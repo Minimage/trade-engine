@@ -402,10 +402,10 @@ async function executeBuy(ticker, price) {
 
   if (!config.paperMode) {
     try {
-      // Alpaca crypto orders use symbol without slash e.g. BTCUSD not BTC/USD
+      // Alpaca crypto orders use BTC/USD format with slash
       const orderSym = isCrypto(ticker)
-        ? alpacaSym(ticker).replace('/', '')
-        : ticker;
+        ? alpacaSym(ticker)  // e.g. BTC/USD
+        : ticker;            // e.g. AAPL
       console.log(`[ORDER] Placing buy: symbol=${orderSym} notional=$${config.maxPositionUsd}`);
       const order = await alpacaPost('/orders', {
         symbol:        orderSym,
@@ -450,9 +450,11 @@ async function executeSell(ticker, price) {
 
   if (!config.paperMode) {
     try {
-      const sellSym = isCrypto(ticker) ? alpacaSym(ticker).replace('/', '') : ticker;
+      const sellSym = isCrypto(ticker) ? alpacaSym(ticker) : ticker;  // BTC/USD or AAPL
       console.log(`[ORDER] Placing sell: symbol=${sellSym}`);
-      await alpacaDelete(`/positions/${sellSym}`);
+      // Position endpoint uses BTCUSD format (no slash) even though orders use BTC/USD
+      const positionSym = sellSym.replace('/', '');
+      await alpacaDelete(`/positions/${positionSym}`);
       logEntry.status = 'executed';
       console.log(`[ORDER] SELL ${ticker} @ ${price} pnl=${pnl.toFixed(2)}`);
     } catch(e) {
