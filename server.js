@@ -3,14 +3,24 @@ import cors from 'cors';
 import fetch from 'node-fetch';
 
 const app  = express();
-const PORT = 3002;
+const PORT = process.env.PORT || 3002;
 
 app.use(cors());
 app.use(express.json());
 
+// Serve built React frontend in production
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import { existsSync } from 'fs';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const distPath = join(__dirname, 'dist');
+if (existsSync(distPath)) {
+  app.use(express.static(distPath));
+}
+
 // ── Alpaca config ─────────────────────────────────────────────────
-const ALPACA_KEY    = 'PK7FVW3V4B3SIYZ5ILOEEONJPZ';
-const ALPACA_SECRET = 'BRPgtEn6mbM57jirhZ4ftn4fXT8NK4QRugVL8Eaks52u';
+const ALPACA_KEY    = process.env.ALPACA_KEY    || 'PK7FVW3V4B3SIYZ5ILOEEONJPZ';
+const ALPACA_SECRET = process.env.ALPACA_SECRET || 'BRPgtEn6mbM57jirhZ4ftn4fXT8NK4QRugVL8Eaks52u';
 const ALPACA_BASE   = 'https://paper-api.alpaca.markets/v2';
 const DATA_BASE     = 'https://data.alpaca.markets/v2';
 const CRYPTO_BASE   = 'https://data.alpaca.markets/v1beta3/crypto/us';
@@ -633,6 +643,16 @@ app.post('/api/sell/:ticker', async (req, res) => {
   const err = await executeSell(ticker, price);
   if (err) return res.status(400).json({ success: false, error: err });
   res.json({ success: true, ticker, price, paper: config.paperMode });
+});
+
+// Serve React app for any non-API route
+app.get('*', (req, res) => {
+  const indexPath = join(__dirname, 'dist', 'index.html');
+  if (existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.json({ status: 'Trade engine API running', frontend: 'not built' });
+  }
 });
 
 // ── Start server ──────────────────────────────────────────────────
