@@ -1,543 +1,681 @@
-import express from 'express';
-import cors from 'cors';
-import fetch from 'node-fetch';
+import { useState, useEffect, useCallback } from "react";
 
-const app  = express();
-const PORT = 3002;
+const API = "/api";
+const fetcher = (url, opts) =>
+  fetch(url, { headers: { "Content-Type": "application/json" }, ...opts }).then(r => r.json());
 
-app.use(cors());
-app.use(express.json());
+const isCrypto    = t => t.endsWith("-USD");
+const displayName = t => isCrypto(t) ? t.replace("-USD","") : t;
 
-// ── Alpaca config ─────────────────────────────────────────────────
-const ALPACA_KEY    = 'PK7FVW3V4B3SIYZ5ILOEEONJPZ';
-const ALPACA_SECRET = 'BRPgtEn6mbM57jirhZ4ftn4fXT8NK4QRugVL8Eaks52u';
-const ALPACA_BASE   = 'https://paper-api.alpaca.markets/v2';
-const DATA_BASE     = 'https://data.alpaca.markets/v2';
-const CRYPTO_BASE   = 'https://data.alpaca.markets/v1beta3/crypto/us';
-
-const HEADERS = {
-  'APCA-API-KEY-ID':     ALPACA_KEY,
-  'APCA-API-SECRET-KEY': ALPACA_SECRET,
-  'Content-Type':        'application/json',
+const fmtPrice = v => {
+  if (v == null) return "—";
+  const n = parseFloat(v);
+  if (n < 0.0001) return `$${n.toFixed(8)}`;
+  if (n < 0.01)   return `$${n.toFixed(6)}`;
+  if (n < 1)      return `$${n.toFixed(4)}`;
+  return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+};
+const fmt$ = (v, forceDecimals = false) => {
+  if (v == null) return "—";
+  const n = parseFloat(v);
+  if (forceDecimals && Math.abs(n) < 1 && n !== 0)
+    return `$${n.toFixed(4)}`;
+  return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
 
-const CRYPTO_MAP = {
-  'BTC-USD':'BTC/USD','ETH-USD':'ETH/USD','SOL-USD':'SOL/USD',
-  'XRP-USD':'XRP/USD','DOGE-USD':'DOGE/USD','LTC-USD':'LTC/USD',
-  'LINK-USD':'LINK/USD','AVAX-USD':'AVAX/USD','ADA-USD':'ADA/USD',
-  'SHIB-USD':'SHIB/USD',
+// ── Design tokens ─────────────────────────────────────────────────
+const C = {
+  bg: "#07090F", surface: "#0D1420", surface2: "#111C2E",
+  border: "#1A2840", borderFaint: "#0F1A28",
+  text: "#DDE8F5", textMuted: "#344D66", textDim: "#5E7A96",
+  green: "#00E5A0", greenDim: "#021F16",
+  red: "#FF3D5A", redDim: "#260410",
+  amber: "#FFAA33", amberDim: "#261A00",
+  blue: "#3B9EFF", blueDim: "#081830",
+  purple: "#A78BFA", purpleDim: "#160E38",
 };
 
-const isCrypto     = t => t.endsWith('-USD');
-const alpacaSym    = t => isCrypto(t) ? (CRYPTO_MAP[t] || t.replace('-','/')) : t;
-const displayName  = t => isCrypto(t) ? t.replace('-USD','') : t;
-
-// ── Bot state ─────────────────────────────────────────────────────
-let state = {
-  botRunning: false,
-  lastScan:   null,
-  signals:    {},
-  prices:     {},
-  positions:  {},
-  trades:     [],
-  account:    null,
-};
-
-let config = {
-  tickers: ['AAPL','MSFT','NVDA','BTC-USD','ETH-USD','SOL-USD',
-            'XRP-USD','DOGE-USD','AVAX-USD','LINK-USD','LTC-USD'],
-  maxPositionUsd:  10,
-  totalBudgetUsd:  50,
-  minConfidence:   0.60,
-  rsiOversold:     38,
-  rsiOverbought:   62,
-  profitTargetPct: 3.0,
-  stopLossPct:     2.0,
-  scanIntervalSec: 120,
-  paperMode:       true,
-};
-
-let botTimer = null;
-
-// ── Alpaca helpers ────────────────────────────────────────────────
-async function alpacaGet(path, base = ALPACA_BASE) {
-  const r = await fetch(`${base}${path}`, { headers: HEADERS });
-  const text = await r.text();
-  if (!r.ok) throw new Error(`${r.status}: ${text}`);
-  return JSON.parse(text);
-}
-
-async function alpacaPost(path, body) {
-  const r = await fetch(`${ALPACA_BASE}${path}`, {
-    method: 'POST', headers: HEADERS, body: JSON.stringify(body),
-  });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.message || JSON.stringify(data));
-  return data;
-}
-
-async function alpacaDelete(path) {
-  const r = await fetch(`${ALPACA_BASE}${path}`, { method: 'DELETE', headers: HEADERS });
-  if (!r.ok && r.status !== 204) throw new Error(`${r.status}`);
-  return true;
-}
-
-// ── Market data ───────────────────────────────────────────────────
-async function fetchBars(ticker, limit = 200) {
-  try {
-    const sym = alpacaSym(ticker);
-    // Use a start date 6 months back to get enough history for indicators
-    const start = new Date();
-    start.setMonth(start.getMonth() - 6);
-    const startStr = start.toISOString().split('T')[0];
-
-    if (isCrypto(ticker)) {
-      const symEncoded = encodeURIComponent(sym);
-      const url = `${CRYPTO_BASE}/bars?symbols=${symEncoded}&timeframe=1Day&start=${startStr}&limit=${limit}`;
-      console.log(`[DATA] Fetching crypto bars: ${url}`);
-      const r = await fetch(url, { headers: HEADERS });
-      const d = await r.json();
-      const bars = d.bars?.[sym] || [];
-      console.log(`[DATA] ${ticker}: ${bars.length} bars`);
-      return bars.map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
-    } else {
-      const url = `${DATA_BASE}/stocks/bars?symbols=${sym}&timeframe=1Day&start=${startStr}&limit=${limit}&feed=iex&adjustment=raw`;
-      console.log(`[DATA] Fetching stock bars: ${url}`);
-      const r = await fetch(url, { headers: HEADERS });
-      const d = await r.json();
-      const bars = d.bars?.[sym] || [];
-      console.log(`[DATA] ${ticker}: ${bars.length} bars`);
-      return bars.map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
-    }
-  } catch(e) {
-    console.error(`[DATA] fetchBars ${ticker}:`, e.message);
-    return [];
-  }
-}
-
-async function fetchLatestPrice(ticker) {
-  try {
-    const sym = alpacaSym(ticker);
-    if (isCrypto(ticker)) {
-      const symEncoded = encodeURIComponent(sym);
-      const url = `${CRYPTO_BASE}/latest/bars?symbols=${symEncoded}`;
-      const r = await fetch(url, { headers: HEADERS });
-      const d = await r.json();
-      return d.bars?.[sym]?.c || null;
-    } else {
-      const r = await fetch(
-        `${DATA_BASE}/stocks/bars/latest?symbols=${sym}&feed=iex`,
-        { headers: HEADERS }
-      );
-      const d = await r.json();
-      return d.bars?.[sym]?.c || null;
-    }
-  } catch(e) {
-    console.error(`[PRICE] ${ticker}:`, e.message);
-    return null;
-  }
-}
-
-
-
-// ── Technical indicators ──────────────────────────────────────────
-function computeRSI(closes, period = 14) {
-  if (closes.length < period + 1) return null;
-  const deltas = closes.slice(1).map((c, i) => c - closes[i]);
-  let avgGain = deltas.slice(0, period).filter(d => d > 0).reduce((a,b) => a+b, 0) / period;
-  let avgLoss = deltas.slice(0, period).filter(d => d < 0).reduce((a,b) => a+Math.abs(b), 0) / period;
-  for (let i = period; i < deltas.length; i++) {
-    avgGain = (avgGain * (period-1) + Math.max(0, deltas[i])) / period;
-    avgLoss = (avgLoss * (period-1) + Math.max(0, -deltas[i])) / period;
-  }
-  if (avgLoss === 0) return 100;
-  return 100 - 100 / (1 + avgGain / avgLoss);
-}
-
-function computeMACD(closes) {
-  if (closes.length < 35) return {};
-  const ema = (data, span) => {
-    const k = 2 / (span + 1);
-    return data.reduce((acc, v, i) => {
-      acc.push(i === 0 ? v : v * k + acc[i-1] * (1-k));
-      return acc;
-    }, []);
+function Pill({ label, variant }) {
+  const map = {
+    buy:    [C.greenDim, C.green],
+    sell:   [C.redDim,   C.red],
+    hold:   [C.surface2, C.textDim],
+    BUY:    [C.blueDim,  C.blue],
+    SELL:   [C.amberDim, C.amber],
+    crypto: [C.purpleDim,C.purple],
+    stock:  [C.greenDim, C.green],
+    paper:  [C.amberDim, C.amber],
+    live:   [C.redDim,   C.red],
+    on:     [C.greenDim, C.green],
+    off:    [C.surface2, C.textDim],
   };
-  const ema12 = ema(closes, 12);
-  const ema26 = ema(closes, 26);
-  const macdLine   = ema12.map((v, i) => v - ema26[i]);
-  const signalLine = ema(macdLine.slice(-9), 9);
-  return {
-    macd:       macdLine[macdLine.length - 1],
-    signal:     signalLine[signalLine.length - 1],
-    macdPrev:   macdLine[macdLine.length - 2],
-    signalPrev: signalLine[signalLine.length - 2],
-  };
+  const [bg, color] = map[variant] || map[label] || map.hold;
+  return (
+    <span style={{
+      background: bg, color, fontSize: 9, fontWeight: 800,
+      padding: "3px 7px", borderRadius: 3, letterSpacing: "0.08em",
+      textTransform: "uppercase", border: `1px solid ${color}22`,
+      whiteSpace: "nowrap",
+    }}>{label}</span>
+  );
 }
 
-function computeBollinger(closes, period = 20) {
-  if (closes.length < period) return {};
-  const slice = closes.slice(-period);
-  const mid = slice.reduce((a,b) => a+b, 0) / period;
-  const std = Math.sqrt(slice.reduce((a,b) => a + (b-mid)**2, 0) / period);
-  return { upper: mid + 2*std, lower: mid - 2*std };
+function Btn({ children, onClick, disabled, color = "default" }) {
+  const col = color === "green" ? C.green : color === "red" ? C.red : C.textDim;
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      background: "none", border: `1px solid ${col}33`, borderRadius: 5,
+      padding: "6px 14px", fontSize: 10, cursor: disabled ? "not-allowed" : "pointer",
+      color: col, fontWeight: 800, letterSpacing: "0.08em",
+      textTransform: "uppercase", opacity: disabled ? 0.4 : 1,
+      fontFamily: "inherit", transition: "opacity 0.15s",
+    }}>{children}</button>
+  );
 }
 
-function computeEMA(closes, span) {
-  if (closes.length < span) return null;
-  const k = 2 / (span + 1);
-  return closes.reduce((acc, v, i) => i === 0 ? v : acc * (1-k) + v * k, closes[0]);
+const Card = ({ children, style }) => (
+  <div style={{
+    background: C.surface, border: `1px solid ${C.border}`,
+    borderRadius: 8, overflow: "hidden", ...style,
+  }}>{children}</div>
+);
+
+const SectionLabel = ({ children }) => (
+  <p style={{
+    fontSize: 9, fontWeight: 800, textTransform: "uppercase",
+    letterSpacing: "0.14em", color: C.textMuted,
+    padding: "9px 16px 7px", borderBottom: `1px solid ${C.borderFaint}`,
+    margin: 0,
+  }}>{children}</p>
+);
+
+function Metric({ label, value, color }) {
+  return (
+    <div style={{ background: C.surface2, borderRadius: 7, padding: "12px 14px" }}>
+      <p style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase",
+        letterSpacing: "0.12em", color: C.textMuted, margin: "0 0 6px" }}>{label}</p>
+      <p style={{ fontSize: 20, fontWeight: 800, margin: 0,
+        fontVariantNumeric: "tabular-nums", color: color || C.text }}>{value ?? "—"}</p>
+    </div>
+  );
 }
 
-function detectSignal(bars) {
-  if (!bars || bars.length < 50)
-    return { action:'hold', confidence:0, reasons:['Insufficient data'], rsi:null, price: bars?.[bars.length-1]?.c || 0 };
-
-  const closes = bars.map(b => b.c);
-  const vols   = bars.map(b => b.v);
-  const price  = closes[closes.length - 1];
-  let buyVotes = 0, sellVotes = 0, total = 0;
-  const reasons = [];
-
-  const rsi = computeRSI(closes);
-  if (rsi !== null) {
-    total += 2;
-    if (rsi < config.rsiOversold)     { buyVotes  += 2; reasons.push(`RSI oversold (${rsi.toFixed(1)})`); }
-    else if (rsi > config.rsiOverbought) { sellVotes += 2; reasons.push(`RSI overbought (${rsi.toFixed(1)})`); }
-  }
-
-  const { macd, signal, macdPrev, signalPrev } = computeMACD(closes);
-  if (macd != null) {
-    total += 2;
-    if (macdPrev < signalPrev && macd > signal)   { buyVotes  += 2; reasons.push('MACD bullish crossover'); }
-    else if (macdPrev > signalPrev && macd < signal) { sellVotes += 2; reasons.push('MACD bearish crossover'); }
-  }
-
-  const { upper, lower } = computeBollinger(closes);
-  if (upper != null) {
-    total += 2;
-    if (price <= lower) { buyVotes  += 2; reasons.push('Price at lower Bollinger Band'); }
-    else if (price >= upper) { sellVotes += 2; reasons.push('Price at upper Bollinger Band'); }
-  }
-
-  const ema20 = computeEMA(closes, 20);
-  const ema50 = computeEMA(closes, 50);
-  if (ema20 && ema50) {
-    total += 1;
-    if (ema20 > ema50) { buyVotes  += 1; reasons.push('EMA20 above EMA50 (uptrend)'); }
-    else               { sellVotes += 1; reasons.push('EMA20 below EMA50 (downtrend)'); }
-  }
-
-  const avgVol  = vols.slice(-20).reduce((a,b) => a+b, 0) / 20;
-  const currVol = vols[vols.length - 1];
-  if (avgVol > 0 && currVol > avgVol * 1.5) {
-    total += 1;
-    if (buyVotes > sellVotes) { buyVotes  += 1; reasons.push('Volume spike confirms bullish'); }
-    else                      { sellVotes += 1; reasons.push('Volume spike confirms bearish'); }
-  }
-
-  if (total === 0) return { action:'hold', confidence:0, reasons:['No data'], rsi, price };
-
-  const confidence = Math.max(buyVotes, sellVotes) / total;
-  let action = 'hold';
-  if (buyVotes > sellVotes && confidence >= config.minConfidence) action = 'buy';
-  else if (sellVotes > buyVotes && confidence >= config.minConfidence) action = 'sell';
-
-  console.log(`[SIGNAL] ${' '.padEnd(12)} action=${action} conf=${(confidence*100).toFixed(0)}% buy=${buyVotes} sell=${sellVotes}/${total}`);
-  return { action, confidence: Math.round(confidence*100)/100, reasons: reasons.length ? reasons : ['No strong signal'], rsi: rsi ? Math.round(rsi*10)/10 : null, price };
+function SignalRow({ ticker, signal, onBuy }) {
+  const [buying, setBuying] = useState(false);
+  const crypto = isCrypto(ticker);
+  const confColor = signal.confidence >= 0.7 ? C.green
+    : signal.confidence >= 0.5 ? C.amber : C.textDim;
+  return (
+    <div style={{
+      display: "grid", gridTemplateColumns: "100px 90px 48px 1fr 58px 50px 55px",
+      gap: 10, padding: "9px 16px", borderBottom: `1px solid ${C.borderFaint}`,
+      alignItems: "center", fontSize: 12,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+        <span style={{ fontWeight: 700, color: C.text }}>{displayName(ticker)}</span>
+        <Pill label={crypto ? "crypto" : "stock"} variant={crypto ? "crypto" : "stock"} />
+      </div>
+      <span style={{ color: C.text, fontVariantNumeric: "tabular-nums" }}>{fmtPrice(signal.price)}</span>
+      <span style={{ color: C.textDim, fontSize: 11 }}>{signal.rsi?.toFixed(1) || "—"}</span>
+      <span style={{ fontSize: 10, color: C.textDim, overflow: "hidden",
+        textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {signal.blocked ? `⚠ ${signal.blocked}` : signal.reasons?.[0] || "—"}
+      </span>
+      <Pill label={signal.action} variant={signal.action} />
+      <span style={{ textAlign: "right", fontSize: 11, fontWeight: 700, color: confColor }}>
+        {Math.round((signal.confidence || 0) * 100)}%
+      </span>
+      <button onClick={async () => { setBuying(true); await onBuy(); setBuying(false); }}
+        disabled={buying} style={{
+          background: buying ? C.borderFaint : C.greenDim,
+          border: `1px solid ${C.green}33`, borderRadius: 4,
+          padding: "4px 0", fontSize: 10, cursor: "pointer",
+          color: C.green, fontWeight: 700, width: "100%",
+          opacity: buying ? 0.5 : 1, fontFamily: "inherit",
+        }}>{buying ? "..." : "Buy"}</button>
+    </div>
+  );
 }
 
-// ── Account & position sync ───────────────────────────────────────
-async function refreshAccount() {
-  try {
-    state.account = await alpacaGet('/account');
-  } catch(e) { console.error('[ACCOUNT]', e.message); }
+function PositionRow({ ticker, pos, onSell }) {
+  const [selling, setSelling] = useState(false);
+  const crypto = isCrypto(ticker);
+  const up = (pos.pnl || 0) >= 0;
+  return (
+    <div style={{
+      display: "grid", gridTemplateColumns: "110px 90px 90px 1fr 120px 60px",
+      gap: 10, padding: "9px 16px", borderBottom: `1px solid ${C.borderFaint}`,
+      alignItems: "center", fontSize: 12,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+        <span style={{ fontWeight: 700, color: C.text }}>{displayName(ticker)}</span>
+        <Pill label={crypto ? "crypto" : "stock"} variant={crypto ? "crypto" : "stock"} />
+      </div>
+      <span style={{ color: C.textDim }}>{fmtPrice(pos.avg_cost)}</span>
+      <span style={{ color: C.text }}>{fmtPrice(pos.current_price)}</span>
+      <span style={{ color: C.textDim, fontSize: 11 }}>{pos.shares?.toFixed(6)}</span>
+      <span style={{ textAlign: "right", fontWeight: 700, color: up ? C.green : C.red }}>
+        {up ? "+" : ""}{fmt$(pos.pnl, true)} ({up ? "+" : ""}{pos.pnl_pct?.toFixed(2)}%)
+      </span>
+      <button onClick={async () => {
+          if (!window.confirm(`Sell all ${displayName(ticker)}?`)) return;
+          setSelling(true); await onSell(); setSelling(false);
+        }} disabled={selling} style={{
+          background: selling ? C.borderFaint : C.redDim,
+          border: `1px solid ${C.red}33`, borderRadius: 4,
+          padding: "4px 0", fontSize: 10, cursor: "pointer",
+          color: C.red, fontWeight: 700, width: "100%",
+          opacity: selling ? 0.5 : 1, fontFamily: "inherit",
+        }}>{selling ? "..." : "Sell"}</button>
+    </div>
+  );
 }
 
-function matchTicker(alpacaSymbol) {
-  // Try exact match first (e.g. AAPL)
-  if (config.tickers.includes(alpacaSymbol)) return alpacaSymbol;
-  // Try CRYPTO_MAP match (e.g. BTC/USD -> BTC-USD)
-  const fromMap = Object.keys(CRYPTO_MAP).find(k => CRYPTO_MAP[k] === alpacaSymbol);
-  if (fromMap) return fromMap;
-  // Try ETHUSD -> ETH-USD (Alpaca sometimes returns without slash)
-  const withDash = alpacaSymbol.replace(/([A-Z]+)(USD)$/, '$1-$2');
-  if (config.tickers.includes(withDash)) return withDash;
-  // Try ETH/USD -> ETH-USD
-  const slashToDash = alpacaSymbol.replace('/', '-');
-  if (config.tickers.includes(slashToDash)) return slashToDash;
-  return null;
-}
-
-async function syncPositions() {
-  try {
-    const alpacaPos = await alpacaGet('/positions');
-    console.log(`[SYNC] Found ${alpacaPos.length} positions on Alpaca`);
-    const synced = {};
-    for (const pos of alpacaPos) {
-      console.log(`[SYNC] Raw position symbol: ${pos.symbol}`);
-      const ticker = matchTicker(pos.symbol);
-      if (!ticker) {
-        console.log(`[SYNC] Could not match ${pos.symbol} to watchlist — skipping`);
-        continue;
+function TradeRow({ trade }) {
+  const isBuy = trade.action === "BUY";
+  return (
+    <div style={{
+      display: "grid", gridTemplateColumns: "130px 50px 80px 1fr 80px",
+      gap: 10, padding: "9px 16px", borderBottom: `1px solid ${C.borderFaint}`,
+      alignItems: "center", fontSize: 11,
+    }}>
+      <span style={{ color: C.textDim }}>
+        {new Date(trade.time).toLocaleString([], { month:"short", day:"numeric",
+          hour:"2-digit", minute:"2-digit" })}
+      </span>
+      <Pill label={trade.action} variant={isBuy ? "BUY" : "SELL"} />
+      <span style={{ fontWeight: 700, color: C.text }}>{displayName(trade.ticker)}</span>
+      <span style={{ color: C.textDim }}>{trade.shares?.toFixed(6)} @ {fmtPrice(trade.price)}</span>
+      {trade.pnl !== undefined
+        ? <span style={{ textAlign: "right", fontWeight: 700,
+            color: trade.pnl >= 0 ? C.green : C.red }}>
+            {trade.pnl >= 0 ? "+" : ""}{fmt$(trade.pnl)}
+          </span>
+        : <span style={{ textAlign: "right", color: C.textMuted, fontSize: 10 }}>
+            {trade.paper ? "paper" : "live"}
+          </span>
       }
-      console.log(`[SYNC] Matched ${pos.symbol} -> ${ticker}`);
-      synced[ticker] = {
-        shares:        parseFloat(pos.qty),
-        avg_cost:      parseFloat(pos.avg_entry_price),
-        current_price: parseFloat(pos.current_price),
-        pnl:           parseFloat(pos.unrealized_pl),
-        pnl_pct:       parseFloat(pos.unrealized_plpc) * 100,
-        asset_type:    isCrypto(ticker) ? 'crypto' : 'stock',
-        synced:        true,
-      };
-    }
-    // Keep paper positions that aren't in Alpaca
-    for (const [t, p] of Object.entries(state.positions)) {
-      if (!p.synced && !synced[t]) synced[t] = p;
-    }
-    state.positions = synced;
-    console.log(`[SYNC] Done — ${Object.keys(synced).length} positions loaded`);
-  } catch(e) { console.error('[SYNC]', e.message); }
+    </div>
+  );
 }
 
-// ── Trade execution ───────────────────────────────────────────────
-async function executeBuy(ticker, price) {
-  const shares = config.maxPositionUsd / price;
-  const logEntry = {
-    time: new Date().toISOString(), ticker, action: 'BUY',
-    price, shares, paper: config.paperMode,
-    asset_type: isCrypto(ticker) ? 'crypto' : 'stock',
+// ── Main app ──────────────────────────────────────────────────────
+export default function App() {
+  const [tab, setTab] = useState("overview");
+  const [status, setStatus] = useState(null);
+  const [account, setAccount] = useState(null);
+  const [signals, setSignals] = useState({});
+  const [positions, setPositions] = useState({});
+  const [trades, setTrades] = useState([]);
+  const [config, setConfig] = useState(null);
+  const [editConfig, setEditConfig] = useState({});
+  const [scanning, setScanning] = useState(false);
+  const [toast, setToast] = useState(null);
+
+  useEffect(() => {
+    document.body.style.background = C.bg;
+    document.body.style.margin = "0";
+    document.documentElement.style.background = C.bg;
+  }, []);
+
+  const showToast = (text, type = "info") => {
+    setToast({ text, type });
+    setTimeout(() => setToast(null), 3500);
   };
 
-  if (!config.paperMode) {
+  const refresh = useCallback(async () => {
     try {
-      // Alpaca crypto orders use symbol without slash e.g. BTCUSD not BTC/USD
-      const orderSym = isCrypto(ticker)
-        ? alpacaSym(ticker).replace('/', '')
-        : ticker;
-      console.log(`[ORDER] Placing buy: symbol=${orderSym} notional=$${config.maxPositionUsd}`);
-      const order = await alpacaPost('/orders', {
-        symbol:        orderSym,
-        notional:      config.maxPositionUsd.toFixed(2),
-        side:          'buy',
-        type:          'market',
-        time_in_force: isCrypto(ticker) ? 'gtc' : 'day',
-      });
-      logEntry.status   = 'executed';
-      logEntry.order_id = order.id;
-      console.log(`[ORDER] BUY ${ticker} $${config.maxPositionUsd} @ ${price} — order ${order.id}`);
-    } catch(e) {
-      logEntry.status = `error: ${e.message}`;
-      console.error(`[ORDER] BUY ${ticker} failed:`, e.message);
-      state.trades.unshift(logEntry);
-      return e.message;
-    }
-  } else {
-    logEntry.status = 'paper';
-    state.positions[ticker] = {
-      shares, avg_cost: price, current_price: price,
-      pnl: 0, pnl_pct: 0,
-      asset_type: isCrypto(ticker) ? 'crypto' : 'stock',
-    };
-  }
+      const [s, acc, sig, pos, t, c] = await Promise.all([
+        fetcher(`${API}/status`).catch(() => null),
+        fetcher(`${API}/account`).catch(() => null),
+        fetcher(`${API}/signals`).catch(() => null),
+        fetcher(`${API}/positions`).catch(() => null),
+        fetcher(`${API}/trades`).catch(() => null),
+        fetcher(`${API}/config`).catch(() => null),
+      ]);
+      if (s)   setStatus(s);
+      if (acc) setAccount(acc);
+      if (sig && typeof sig === "object") setSignals(sig);
+      if (pos) setPositions(pos);
+      if (t)   setTrades(t);
+      if (c)   { setConfig(c); setEditConfig(prev => Object.keys(prev).length ? prev : c); }
+    } catch(e) { console.error("Refresh:", e); }
+  }, []);
 
-  state.trades.unshift(logEntry);
-  if (!config.paperMode) await syncPositions();
-  await refreshAccount();
-  return null;
-}
+  useEffect(() => {
+    refresh();
+    // Use direct fetch in interval to avoid stale closure issues
+    const id = setInterval(async () => {
+      try {
+        const [s, acc, sig, pos, t, c] = await Promise.all([
+          fetch('/api/status').then(r => r.json()).catch(() => null),
+          fetch('/api/account').then(r => r.json()).catch(() => null),
+          fetch('/api/signals').then(r => r.json()).catch(() => null),
+          fetch('/api/positions').then(r => r.json()).catch(() => null),
+          fetch('/api/trades').then(r => r.json()).catch(() => null),
+          fetch('/api/config').then(r => r.json()).catch(() => null),
+        ]);
+        if (s)   setStatus(s);
+        if (acc) setAccount(acc);
+        if (sig && typeof sig === 'object') setSignals(sig);
+        if (pos) setPositions(pos);
+        if (t)   setTrades(t);
+        if (c)   setConfig(c);
+      } catch(e) { console.error('Poll error:', e); }
+    }, 5000);
+    return () => clearInterval(id);
+  }, []);
 
-async function executeSell(ticker, price) {
-  const pos = state.positions[ticker];
-  if (!pos) return 'No position found';
-  const pnl = (price - pos.avg_cost) * pos.shares;
-  const logEntry = {
-    time: new Date().toISOString(), ticker, action: 'SELL',
-    price, shares: pos.shares, pnl, paper: config.paperMode,
-    asset_type: pos.asset_type,
+  const handleScan = async () => {
+    setScanning(true);
+    const res = await fetcher(`${API}/scan`, { method: "POST" }).catch(() => null);
+    if (res?.signals) setSignals(res.signals);
+    await refresh();
+    setScanning(false);
+    showToast(`Scan complete — ${res?.count || 0} tickers`, "success");
   };
 
-  if (!config.paperMode) {
-    try {
-      const sellSym = isCrypto(ticker) ? alpacaSym(ticker).replace('/', '') : ticker;
-      console.log(`[ORDER] Placing sell: symbol=${sellSym}`);
-      await alpacaDelete(`/positions/${sellSym}`);
-      logEntry.status = 'executed';
-      console.log(`[ORDER] SELL ${ticker} @ ${price} pnl=${pnl.toFixed(2)}`);
-    } catch(e) {
-      logEntry.status = `error: ${e.message}`;
-      console.error(`[ORDER] SELL ${ticker} failed:`, e.message);
-      state.trades.unshift(logEntry);
-      return e.message;
-    }
-  } else {
-    logEntry.status = 'paper';
-    delete state.positions[ticker];
-  }
+  const handleSaveConfig = async () => {
+    const payload = { ...editConfig };
+    if (typeof payload.tickers === "string")
+      payload.tickers = payload.tickers.split(",").map(t => t.trim().toUpperCase()).filter(Boolean);
+    ["maxPositionUsd","totalBudgetUsd","rsiOversold","rsiOverbought","scanIntervalSec"]
+      .forEach(k => { if (payload[k] !== undefined) payload[k] = Number(payload[k]); });
+    ["minConfidence","profitTargetPct","stopLossPct"]
+      .forEach(k => { if (payload[k] !== undefined) payload[k] = parseFloat(payload[k]); });
+    await fetcher(`${API}/config`, { method: "POST", body: JSON.stringify(payload) });
+    showToast("Settings saved — restart bot to apply", "success");
+    refresh();
+  };
 
-  state.trades.unshift(logEntry);
-  if (!config.paperMode) await syncPositions();
-  await refreshAccount();
-  return null;
+  const totalPnl   = Object.values(positions).reduce((s, p) => s + (p.pnl || 0), 0);
+  const buySignals = Object.values(signals).filter(s => s.action === "buy").length;
+  const toastColor = { success: C.green, error: C.red, info: C.blue };
+  const tabs       = ["overview","signals","positions","trades","settings"];
+
+  const inp = {
+    background: "#070C14", border: `1px solid ${C.border}`, borderRadius: 5,
+    padding: "8px 12px", fontSize: 12, color: C.text, width: "100%",
+    outline: "none", boxSizing: "border-box", fontFamily: "inherit",
+  };
+
+  return (
+    <div style={{
+      maxWidth: 940, margin: "0 auto", padding: "20px 16px",
+      fontFamily: "'DM Mono','Fira Code','Courier New',monospace",
+      background: C.bg, minHeight: "100vh", color: C.text,
+    }}>
+
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between",
+        alignItems: "flex-start", marginBottom: 22,
+        paddingBottom: 18, borderBottom: `1px solid ${C.border}` }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 18, fontWeight: 800,
+            letterSpacing: "-0.02em", color: C.text }}>
+            <span style={{ color: C.green }}>▸</span> trade engine
+          </h1>
+          <p style={{ margin: "4px 0 0", fontSize: 10, color: C.textMuted, letterSpacing: "0.04em" }}>
+            {status?.lastScan
+              ? `last scan ${new Date(status.lastScan).toLocaleTimeString()}`
+              : "awaiting first scan"}
+            {status?.tickers && ` · ${status.tickers.length} tickers · alpaca paper`}
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 5 }}>
+          {status?.paperMode !== undefined && (
+            <Pill label={status.paperMode ? "paper" : "live"} variant={status.paperMode ? "paper" : "live"} />
+          )}
+          <Pill label={status?.botRunning ? "running" : "idle"} variant={status?.botRunning ? "on" : "off"} />
+        </div>
+      </div>
+
+      {/* Toast */}
+      {toast && (
+        <div style={{
+          padding: "9px 14px", marginBottom: 14, borderRadius: 5, fontSize: 11,
+          background: `${toastColor[toast.type]}11`,
+          border: `1px solid ${toastColor[toast.type]}33`,
+          color: toastColor[toast.type], fontWeight: 700, letterSpacing: "0.04em",
+        }}>{toast.text}</div>
+      )}
+
+      {/* Account bar */}
+      {account && (
+        <Card style={{ marginBottom: 12 }}>
+          <SectionLabel>Alpaca account</SectionLabel>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)" }}>
+            {[
+              { label: "Portfolio",    value: fmt$(account.portfolio_value) },
+              { label: "Buying power", value: fmt$(account.buying_power) },
+              { label: "Cash",         value: fmt$(account.cash) },
+              { label: "Budget left",  value: fmt$(account.budget_remaining),
+                color: account.budget_used_pct > 85 ? C.red
+                     : account.budget_used_pct > 60 ? C.amber : C.green },
+            ].map((m, i) => (
+              <div key={m.label} style={{
+                padding: "12px 16px",
+                borderRight: i < 3 ? `1px solid ${C.borderFaint}` : "none",
+              }}>
+                <p style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase",
+                  letterSpacing: "0.12em", color: C.textMuted, margin: "0 0 5px" }}>{m.label}</p>
+                <p style={{ fontSize: 16, fontWeight: 800, margin: 0,
+                  color: m.color || C.text, fontVariantNumeric: "tabular-nums" }}>{m.value}</p>
+              </div>
+            ))}
+          </div>
+          <div style={{ padding: "10px 16px 12px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between",
+              fontSize: 10, color: C.textMuted, marginBottom: 5 }}>
+              <span>Deployed: <span style={{ color: C.text }}>{fmt$(account.deployed_capital)}</span></span>
+              <span>Limit: <span style={{ color: C.text }}>{fmt$(account.total_budget_usd)}</span></span>
+            </div>
+            <div style={{ height: 3, background: C.borderFaint, borderRadius: 99 }}>
+              <div style={{
+                height: "100%", borderRadius: 99,
+                width: `${Math.min(100, account.budget_used_pct || 0)}%`,
+                background: (account.budget_used_pct||0) > 85 ? C.red
+                          : (account.budget_used_pct||0) > 60 ? C.amber : C.green,
+                boxShadow: `0 0 8px ${C.green}44`, transition: "width 0.5s",
+              }} />
+            </div>
+            <p style={{ fontSize: 10, margin: "4px 0 0", textAlign: "right",
+              fontWeight: 700, color: C.green }}>{(account.budget_used_pct||0).toFixed(1)}% used</p>
+          </div>
+        </Card>
+      )}
+
+      {/* Metrics */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 8, marginBottom: 18 }}>
+        <Metric label="Positions"     value={Object.keys(positions).length} />
+        <Metric label="Unrealized P&L"
+          value={`${totalPnl >= 0 ? "+" : ""}${fmt$(totalPnl, true)}`}
+          color={totalPnl >= 0 ? C.green : C.red} />
+        <Metric label="Buy signals"   value={buySignals} color={buySignals > 0 ? C.green : C.text} />
+        <Metric label="Trades"        value={trades.length} />
+        <Metric label="Per-trade"     value={fmt$(config?.maxPositionUsd)} />
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display: "flex", borderBottom: `1px solid ${C.border}`, marginBottom: 18 }}>
+        {tabs.map(t => (
+          <button key={t} onClick={() => setTab(t)} style={{
+            background: "none", border: "none", padding: "7px 14px", fontSize: 9,
+            cursor: "pointer", letterSpacing: "0.12em", fontWeight: 800,
+            textTransform: "uppercase", fontFamily: "inherit",
+            color: tab === t ? C.green : C.textMuted,
+            borderBottom: `2px solid ${tab === t ? C.green : "transparent"}`,
+            marginBottom: -1,
+          }}>{t}</button>
+        ))}
+      </div>
+
+      {/* ── OVERVIEW ── */}
+      {tab === "overview" && (
+        <>
+          <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+            <Btn color={status?.botRunning ? "red" : "green"}
+              onClick={() => fetcher(`${API}/bot/${status?.botRunning ? "stop" : "start"}`,
+                { method: "POST" }).then(refresh)}>
+              {status?.botRunning ? "Stop bot" : "Start bot"}
+            </Btn>
+            <Btn onClick={handleScan} disabled={scanning}>
+              {scanning ? "Scanning…" : "Scan now"}
+            </Btn>
+            <Btn onClick={() => fetcher(`${API}/sync`, { method: "POST" })
+              .then(() => { showToast("Positions synced", "success"); refresh(); })}>
+              Sync positions
+            </Btn>
+          </div>
+
+          <Card style={{ marginBottom: 12 }}>
+            <SectionLabel>Latest signals</SectionLabel>
+            {Object.keys(signals).length === 0 ? (
+              <p style={{ padding: "24px 16px", color: C.textMuted, fontSize: 11, textAlign: "center" }}>
+                No signals — hit <span style={{ color: C.green }}>Scan now</span> to start
+              </p>
+            ) : (
+              <>
+                <div style={{ display: "grid",
+                  gridTemplateColumns: "100px 90px 48px 1fr 58px 50px 55px",
+                  gap: 10, padding: "6px 16px", borderBottom: `1px solid ${C.borderFaint}` }}>
+                  {["Ticker","Price","RSI","Top reason","Action","Conf",""].map(h => (
+                    <span key={h} style={{ fontSize: 9, fontWeight: 800,
+                      textTransform: "uppercase", letterSpacing: "0.1em", color: C.textMuted }}>{h}</span>
+                  ))}
+                </div>
+                {Object.entries(signals).map(([ticker, sig]) => (
+                  <SignalRow key={ticker} ticker={ticker} signal={sig}
+                    onBuy={async () => {
+                      const res = await fetcher(`${API}/buy/${ticker}`, { method: "POST" });
+                      if (res.success) showToast(`${res.paper?"Paper ":""}Bought ${displayName(ticker)} @ ${fmtPrice(res.price)}`, "success");
+                      else showToast(`Buy failed: ${res.error}`, "error");
+                      refresh();
+                    }} />
+                ))}
+              </>
+            )}
+          </Card>
+
+          {trades.length > 0 && (
+            <Card>
+              <SectionLabel>Recent trades</SectionLabel>
+              <div style={{ display: "grid", gridTemplateColumns: "130px 50px 80px 1fr 80px",
+                gap: 10, padding: "6px 16px", borderBottom: `1px solid ${C.borderFaint}` }}>
+                {["Time","Type","Ticker","Details","P&L"].map(h => (
+                  <span key={h} style={{ fontSize: 9, fontWeight: 800,
+                    textTransform: "uppercase", letterSpacing: "0.1em", color: C.textMuted }}>{h}</span>
+                ))}
+              </div>
+              {trades.slice(0,5).map((t,i) => <TradeRow key={i} trade={t} />)}
+            </Card>
+          )}
+        </>
+      )}
+
+      {/* ── SIGNALS ── */}
+      {tab === "signals" && (
+        <Card>
+          <SectionLabel>All signals</SectionLabel>
+          <div style={{ display: "grid",
+            gridTemplateColumns: "100px 90px 48px 1fr 58px 50px 55px",
+            gap: 10, padding: "6px 16px", borderBottom: `1px solid ${C.borderFaint}` }}>
+            {["Ticker","Price","RSI","Top reason","Action","Conf",""].map(h => (
+              <span key={h} style={{ fontSize: 9, fontWeight: 800,
+                textTransform: "uppercase", letterSpacing: "0.1em", color: C.textMuted }}>{h}</span>
+            ))}
+          </div>
+          {Object.keys(signals).length === 0
+            ? <p style={{ padding: "24px 16px", color: C.textMuted, fontSize: 11 }}>Run a scan first</p>
+            : Object.entries(signals).map(([ticker, sig]) => (
+              <SignalRow key={ticker} ticker={ticker} signal={sig}
+                onBuy={async () => {
+                  const res = await fetcher(`${API}/buy/${ticker}`, { method: "POST" });
+                  if (res.success) showToast(`Bought ${displayName(ticker)}`, "success");
+                  else showToast(`Buy failed: ${res.error}`, "error");
+                  refresh();
+                }} />
+            ))
+          }
+        </Card>
+      )}
+
+      {/* ── POSITIONS ── */}
+      {tab === "positions" && (
+        <Card>
+          <SectionLabel>Open positions</SectionLabel>
+          <div style={{ display: "grid",
+            gridTemplateColumns: "110px 90px 90px 1fr 120px 60px",
+            gap: 10, padding: "6px 16px", borderBottom: `1px solid ${C.borderFaint}` }}>
+            {["Ticker","Avg cost","Current","Shares","P&L",""].map(h => (
+              <span key={h} style={{ fontSize: 9, fontWeight: 800,
+                textTransform: "uppercase", letterSpacing: "0.1em", color: C.textMuted }}>{h}</span>
+            ))}
+          </div>
+          {Object.keys(positions).length === 0
+            ? <p style={{ padding: "24px 16px", color: C.textMuted, fontSize: 11 }}>
+                No positions — hit Sync positions if you own stocks/crypto on Alpaca
+              </p>
+            : Object.entries(positions).map(([ticker, pos]) => (
+              <PositionRow key={ticker} ticker={ticker} pos={pos}
+                onSell={async () => {
+                  const res = await fetcher(`${API}/sell/${ticker}`, { method: "POST" });
+                  if (res.success) showToast(`${res.paper?"Paper ":""}Sold ${displayName(ticker)}`, "success");
+                  else showToast(`Sell failed: ${res.error}`, "error");
+                  refresh();
+                }} />
+            ))
+          }
+        </Card>
+      )}
+
+      {/* ── TRADES ── */}
+      {tab === "trades" && (
+        <Card>
+          <SectionLabel>Trade history</SectionLabel>
+          <div style={{ display: "grid", gridTemplateColumns: "130px 50px 80px 1fr 80px",
+            gap: 10, padding: "6px 16px", borderBottom: `1px solid ${C.borderFaint}` }}>
+            {["Time","Type","Ticker","Details","P&L"].map(h => (
+              <span key={h} style={{ fontSize: 9, fontWeight: 800,
+                textTransform: "uppercase", letterSpacing: "0.1em", color: C.textMuted }}>{h}</span>
+            ))}
+          </div>
+          {trades.length === 0
+            ? <p style={{ padding: "24px 16px", color: C.textMuted, fontSize: 11 }}>No trades yet</p>
+            : trades.map((t,i) => <TradeRow key={i} trade={t} />)
+          }
+        </Card>
+      )}
+
+      {/* ── SETTINGS ── */}
+      {tab === "settings" && editConfig && (
+        <div style={{ display: "grid", gap: 10 }}>
+
+          <Card>
+            <SectionLabel>Aggression level</SectionLabel>
+            <div style={{ padding: 14 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginBottom: 14 }}>
+                {[
+                  { label: "Conservative", confidence: 0.75, oversold: 30, overbought: 70, color: C.blue },
+                  { label: "Moderate",     confidence: 0.60, oversold: 38, overbought: 62, color: C.green },
+                  { label: "Aggressive",   confidence: 0.45, oversold: 45, overbought: 55, color: C.amber },
+                  { label: "Very aggro",   confidence: 0.35, oversold: 50, overbought: 50, color: C.red },
+                ].map(p => {
+                  const active = parseFloat(editConfig.minConfidence) === p.confidence
+                    && parseFloat(editConfig.rsiOversold) === p.oversold;
+                  return (
+                    <button key={p.label} onClick={() => setEditConfig(e => ({
+                      ...e, minConfidence: p.confidence,
+                      rsiOversold: p.oversold, rsiOverbought: p.overbought,
+                    }))} style={{
+                      background: active ? `${p.color}11` : C.surface2,
+                      border: `1px solid ${active ? p.color : C.border}`,
+                      borderRadius: 5, padding: "10px 8px",
+                      cursor: "pointer", textAlign: "left", fontFamily: "inherit",
+                    }}>
+                      <p style={{ fontSize: 10, fontWeight: 800, color: active ? p.color : C.text,
+                        margin: "0 0 2px", letterSpacing: "0.04em" }}>{p.label}</p>
+                      <p style={{ fontSize: 9, color: active ? p.color : C.textDim, margin: 0 }}>
+                        {p.confidence * 100}% confidence
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+                {[
+                  { key: "minConfidence", label: "Min confidence", step: "0.05" },
+                  { key: "rsiOversold",   label: "RSI oversold" },
+                  { key: "rsiOverbought", label: "RSI overbought" },
+                ].map(f => (
+                  <div key={f.key}>
+                    <p style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase",
+                      letterSpacing: "0.1em", color: C.textMuted, margin: "0 0 5px" }}>{f.label}</p>
+                    <input type="number" step={f.step || "1"} value={editConfig[f.key] ?? ""}
+                      onChange={e => setEditConfig(p => ({ ...p, [f.key]: e.target.value }))}
+                      style={inp} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </Card>
+
+          <Card>
+            <SectionLabel>Tickers</SectionLabel>
+            <div style={{ padding: 14 }}>
+              <input
+                value={Array.isArray(editConfig.tickers) ? editConfig.tickers.join(", ") : ""}
+                onChange={e => setEditConfig(p => ({
+                  ...p, tickers: e.target.value.split(",").map(t => t.trim().toUpperCase()).filter(Boolean)
+                }))}
+                placeholder="AAPL, MSFT, BTC-USD, ETH-USD"
+                style={inp} />
+              <p style={{ fontSize: 9, color: C.textMuted, margin: "6px 0 0" }}>
+                Stocks: AAPL, NVDA · Crypto: BTC-USD, ETH-USD, SOL-USD
+              </p>
+            </div>
+          </Card>
+
+          <Card>
+            <SectionLabel>Budget</SectionLabel>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
+              {[
+                { key: "totalBudgetUsd", label: "Total budget cap ($)", step: "10" },
+                { key: "maxPositionUsd", label: "Per-trade limit ($)",  step: "5"  },
+              ].map((f, i) => (
+                <div key={f.key} style={{
+                  padding: 14,
+                  borderRight: i === 0 ? `1px solid ${C.borderFaint}` : "none",
+                }}>
+                  <p style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase",
+                    letterSpacing: "0.1em", color: C.textMuted, margin: "0 0 6px" }}>{f.label}</p>
+                  <input type="number" step={f.step} value={editConfig[f.key] ?? ""}
+                    onChange={e => setEditConfig(p => ({ ...p, [f.key]: e.target.value }))}
+                    style={inp} />
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          <Card>
+            <SectionLabel>Trading parameters</SectionLabel>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr" }}>
+              {[
+                { key: "profitTargetPct", label: "Profit target (%)", step: "0.5" },
+                { key: "stopLossPct",     label: "Stop loss (%)",     step: "0.5" },
+                { key: "scanIntervalSec", label: "Scan interval (sec)" },
+              ].map((f, i) => (
+                <div key={f.key} style={{
+                  padding: 14,
+                  borderBottom: i < 1 ? `1px solid ${C.borderFaint}` : "none",
+                  borderRight: i % 2 === 0 ? `1px solid ${C.borderFaint}` : "none",
+                }}>
+                  <p style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase",
+                    letterSpacing: "0.1em", color: C.textMuted, margin: "0 0 6px" }}>{f.label}</p>
+                  <input type="number" step={f.step || "1"} value={editConfig[f.key] ?? ""}
+                    onChange={e => setEditConfig(p => ({ ...p, [f.key]: e.target.value }))}
+                    style={inp} />
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          <Card>
+            <SectionLabel>Mode</SectionLabel>
+            <div style={{ padding: 14 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 10,
+                fontSize: 11, cursor: "pointer", color: C.text }}>
+                <input type="checkbox"
+                  checked={editConfig.paperMode !== undefined ? editConfig.paperMode : true}
+                  onChange={e => setEditConfig(p => ({ ...p, paperMode: e.target.checked }))} />
+                Paper mode — simulate trades, no real orders sent to Alpaca
+              </label>
+            </div>
+          </Card>
+
+          <Btn color="green" onClick={handleSaveConfig}>Save settings</Btn>
+        </div>
+      )}
+    </div>
+  );
 }
-
-// ── Bot scan loop ─────────────────────────────────────────────────
-async function runScan() {
-  console.log(`[SCAN] Starting — ${config.tickers.length} tickers`);
-  for (const ticker of config.tickers) {
-    try {
-      const bars   = await fetchBars(ticker, 100);
-      const signal = detectSignal(bars);
-      const price  = await fetchLatestPrice(ticker) || signal.price;
-      signal.price = price;
-      state.signals[ticker] = signal;
-      state.prices[ticker]  = price;
-
-      // Update current price in positions
-      if (state.positions[ticker]) {
-        const pos = state.positions[ticker];
-        pos.current_price = price;
-        pos.pnl     = (price - pos.avg_cost) * pos.shares;
-        pos.pnl_pct = (price - pos.avg_cost) / pos.avg_cost * 100;
-      }
-
-      const inPos = ticker in state.positions;
-
-      // Exit logic — only act if we have a valid price
-      if (inPos && price && price > 0) {
-        const pos = state.positions[ticker];
-        const pct = (price - pos.avg_cost) / pos.avg_cost * 100;
-        if (pct >= config.profitTargetPct) {
-          console.log(`[BOT] Selling ${ticker} — profit target hit (+${pct.toFixed(1)}%)`);
-          await executeSell(ticker, price);
-        } else if (pct <= -config.stopLossPct) {
-          console.log(`[BOT] Selling ${ticker} — stop loss hit (${pct.toFixed(1)}%)`);
-          await executeSell(ticker, price);
-        } else if (signal.action === 'sell') {
-          console.log(`[BOT] Selling ${ticker} — sell signal`);
-          await executeSell(ticker, price);
-        }
-      }
-
-      // Entry logic
-      if (!inPos && signal.action === 'buy') {
-        const deployed = Object.values(state.positions)
-          .reduce((s, p) => s + p.avg_cost * p.shares, 0);
-        if (deployed + config.maxPositionUsd <= config.totalBudgetUsd) {
-          console.log(`[BOT] Buying ${ticker} @ ${price}`);
-          await executeBuy(ticker, price);
-        } else {
-          state.signals[ticker].blocked = 'Budget cap reached';
-        }
-      }
-    } catch(e) {
-      console.error(`[SCAN] ${ticker} error:`, e.message);
-    }
-  }
-
-  await syncPositions();
-  await refreshAccount();
-  state.lastScan = new Date().toISOString();
-  console.log(`[SCAN] Done — ${Object.keys(state.signals).length} signals, ${Object.keys(state.positions).length} positions`);
-}
-
-// ── API routes ────────────────────────────────────────────────────
-app.get('/api/status', (req, res) => res.json({
-  botRunning: state.botRunning,
-  lastScan:   state.lastScan,
-  paperMode:  config.paperMode,
-  tickers:    config.tickers,
-}));
-
-app.get('/api/account', (req, res) => {
-  const deployed = Object.values(state.positions)
-    .reduce((s, p) => s + (p.avg_cost * p.shares), 0);
-  res.json({
-    ...state.account,
-    deployed_capital:  Math.round(deployed * 100) / 100,
-    total_budget_usd:  config.totalBudgetUsd,
-    budget_remaining:  Math.max(0, config.totalBudgetUsd - deployed),
-    budget_used_pct:   config.totalBudgetUsd > 0 ? Math.round(deployed / config.totalBudgetUsd * 10000) / 100 : 0,
-  });
-});
-
-app.get('/api/signals',   (req, res) => res.json(state.signals));
-app.get('/api/positions', (req, res) => res.json(state.positions));
-app.get('/api/trades',    (req, res) => res.json(state.trades.slice(0, 50)));
-app.get('/api/config',    (req, res) => res.json(config));
-
-app.post('/api/config', (req, res) => {
-  const allowed = ['tickers','maxPositionUsd','totalBudgetUsd','minConfidence',
-    'rsiOversold','rsiOverbought','profitTargetPct','stopLossPct','scanIntervalSec','paperMode'];
-  for (const key of allowed) {
-    if (req.body[key] !== undefined) config[key] = req.body[key];
-  }
-  res.json({ success: true, config });
-});
-
-app.post('/api/connect', async (req, res) => {
-  try {
-    const account = await alpacaGet('/account');
-    state.account = account;
-    await syncPositions();
-    res.json({ success: true, account });
-  } catch(e) {
-    res.status(400).json({ success: false, error: e.message });
-  }
-});
-
-app.post('/api/bot/start', async (req, res) => {
-  if (state.botRunning) return res.json({ success: true, message: 'Already running' });
-  state.botRunning = true;
-  await runScan();
-  botTimer = setInterval(runScan, config.scanIntervalSec * 1000);
-  res.json({ success: true });
-});
-
-app.post('/api/bot/stop', (req, res) => {
-  clearInterval(botTimer);
-  state.botRunning = false;
-  res.json({ success: true });
-});
-
-app.post('/api/scan', async (req, res) => {
-  await runScan();
-  res.json({ success: true, signals: state.signals, count: Object.keys(state.signals).length });
-});
-
-app.post('/api/sync', async (req, res) => {
-  await syncPositions();
-  await refreshAccount();
-  res.json({ success: true, positions: state.positions });
-});
-
-app.post('/api/buy/:ticker', async (req, res) => {
-  const ticker = req.params.ticker.toUpperCase();
-  if (!config.tickers.includes(ticker))
-    return res.status(400).json({ success: false, error: 'Ticker not in watchlist' });
-  const price = await fetchLatestPrice(ticker) || state.prices[ticker];
-  if (!price)
-    return res.status(400).json({ success: false, error: 'No price available — run a scan first' });
-  const err = await executeBuy(ticker, price);
-  if (err) return res.status(400).json({ success: false, error: err });
-  res.json({ success: true, ticker, price, amount: config.maxPositionUsd, paper: config.paperMode });
-});
-
-app.post('/api/sell/:ticker', async (req, res) => {
-  const ticker = req.params.ticker.toUpperCase();
-  if (!state.positions[ticker])
-    return res.status(400).json({ success: false, error: `No open position for ${ticker}` });
-  const price = await fetchLatestPrice(ticker) || state.positions[ticker].current_price;
-  const err = await executeSell(ticker, price);
-  if (err) return res.status(400).json({ success: false, error: err });
-  res.json({ success: true, ticker, price, paper: config.paperMode });
-});
-
-// ── Start server ──────────────────────────────────────────────────
-app.listen(PORT, async () => {
-  console.log(`[SERVER] Trade engine running on port ${PORT}`);
-  await refreshAccount();
-  await syncPositions();
-  console.log(`[SERVER] Connected to Alpaca — paper mode: ${config.paperMode}`);
-});
