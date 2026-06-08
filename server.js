@@ -3,7 +3,7 @@ import cors from 'cors';
 import fetch from 'node-fetch';
 
 const app  = express();
-const PORT = 3002;
+const PORT = 3001;
 
 app.use(cors());
 app.use(express.json());
@@ -86,25 +86,19 @@ async function fetchBars(ticker, limit = 100) {
   try {
     const sym = alpacaSym(ticker);
     if (isCrypto(ticker)) {
-      // Crypto needs more history — use 200 bars to ensure enough for indicators
-      const url = `${DATA_BASE}/crypto/us/bars?symbols=${encodeURIComponent(sym)}&timeframe=1Day&limit=200`;
-      console.log(`[DATA] Fetching crypto bars: ${url}`);
-      const r = await fetch(url, { headers: HEADERS });
+      const r = await fetch(
+        `${DATA_BASE}/crypto/us/bars?symbols=${encodeURIComponent(sym)}&timeframe=1Day&limit=${limit}`,
+        { headers: HEADERS }
+      );
       const d = await r.json();
-      console.log(`[DATA] ${ticker} crypto response keys:`, Object.keys(d));
-      // Alpaca returns bars nested under the symbol
-      const bars = d.bars?.[sym] || d.bars?.[sym.replace('/','%2F')] || [];
-      console.log(`[DATA] ${ticker}: ${bars.length} bars returned`);
-      return bars.map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
+      return (d.bars?.[sym] || []).map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
     } else {
-      // Stocks — use daily bars for more history (hourly can be sparse)
-      const url = `${DATA_BASE}/stocks/bars?symbols=${sym}&timeframe=1Day&limit=200&feed=iex`;
-      console.log(`[DATA] Fetching stock bars: ${url}`);
-      const r = await fetch(url, { headers: HEADERS });
+      const r = await fetch(
+        `${DATA_BASE}/stocks/bars?symbols=${sym}&timeframe=1Hour&limit=${limit}&feed=iex`,
+        { headers: HEADERS }
+      );
       const d = await r.json();
-      const bars = d.bars?.[sym] || [];
-      console.log(`[DATA] ${ticker}: ${bars.length} bars returned`);
-      return bars.map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
+      return (d.bars?.[sym] || []).map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
     }
   } catch(e) {
     console.error(`[DATA] fetchBars ${ticker}:`, e.message);
@@ -116,10 +110,11 @@ async function fetchLatestPrice(ticker) {
   try {
     const sym = alpacaSym(ticker);
     if (isCrypto(ticker)) {
-      const url = `${DATA_BASE}/crypto/us/latest/bars?symbols=${encodeURIComponent(sym)}`;
-      const r = await fetch(url, { headers: HEADERS });
+      const r = await fetch(
+        `${DATA_BASE}/crypto/us/latest/bars?symbols=${encodeURIComponent(sym)}`,
+        { headers: HEADERS }
+      );
       const d = await r.json();
-      console.log(`[PRICE] ${ticker} latest response:`, JSON.stringify(d).slice(0, 200));
       return d.bars?.[sym]?.c || null;
     } else {
       const r = await fetch(
@@ -129,13 +124,8 @@ async function fetchLatestPrice(ticker) {
       const d = await r.json();
       return d.trades?.[sym]?.p || null;
     }
-  } catch(e) {
-    console.error(`[PRICE] ${ticker}:`, e.message);
-    return null;
-  }
+  } catch { return null; }
 }
-
-
 
 // ── Technical indicators ──────────────────────────────────────────
 function computeRSI(closes, period = 14) {
