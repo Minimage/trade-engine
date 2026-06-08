@@ -3,7 +3,7 @@ import cors from 'cors';
 import fetch from 'node-fetch';
 
 const app  = express();
-const PORT = 3002;
+const PORT = 3001;
 
 app.use(cors());
 app.use(express.json());
@@ -13,7 +13,6 @@ const ALPACA_KEY    = 'PK7FVW3V4B3SIYZ5ILOEEONJPZ';
 const ALPACA_SECRET = 'BRPgtEn6mbM57jirhZ4ftn4fXT8NK4QRugVL8Eaks52u';
 const ALPACA_BASE   = 'https://paper-api.alpaca.markets/v2';
 const DATA_BASE     = 'https://data.alpaca.markets/v2';
-const CRYPTO_BASE   = 'https://data.alpaca.markets/v1beta3/crypto/us';
 
 const HEADERS = {
   'APCA-API-KEY-ID':     ALPACA_KEY,
@@ -44,17 +43,17 @@ let state = {
 };
 
 let config = {
-  tickers: ['AAPL','MSFT','NVDA','TSLA','ETH-USD','SOL-USD',
+  tickers: ['AAPL','MSFT','NVDA','BTC-USD','ETH-USD','SOL-USD',
             'XRP-USD','DOGE-USD','AVAX-USD','LINK-USD','LTC-USD'],
-  maxPositionUsd:  20,
-  totalBudgetUsd:  500,
+  maxPositionUsd:  10,
+  totalBudgetUsd:  50,
   minConfidence:   0.60,
   rsiOversold:     38,
   rsiOverbought:   62,
-  profitTargetPct: 1.5,
-  stopLossPct:     3.0,
+  profitTargetPct: 3.0,
+  stopLossPct:     2.0,
   scanIntervalSec: 120,
-  paperMode:       false,
+  paperMode:       true,
 };
 
 let botTimer = null;
@@ -83,31 +82,23 @@ async function alpacaDelete(path) {
 }
 
 // ── Market data ───────────────────────────────────────────────────
-async function fetchBars(ticker, limit = 200) {
+async function fetchBars(ticker, limit = 100) {
   try {
     const sym = alpacaSym(ticker);
-    // Use a start date 6 months back to get enough history for indicators
-    const start = new Date();
-    start.setMonth(start.getMonth() - 6);
-    const startStr = start.toISOString().split('T')[0];
-
     if (isCrypto(ticker)) {
-      const symEncoded = encodeURIComponent(sym);
-      const url = `${CRYPTO_BASE}/bars?symbols=${symEncoded}&timeframe=1Day&start=${startStr}&limit=${limit}`;
-      console.log(`[DATA] Fetching crypto bars: ${url}`);
-      const r = await fetch(url, { headers: HEADERS });
+      const r = await fetch(
+        `${DATA_BASE}/crypto/us/bars?symbols=${encodeURIComponent(sym)}&timeframe=1Day&limit=${limit}`,
+        { headers: HEADERS }
+      );
       const d = await r.json();
-      const bars = d.bars?.[sym] || [];
-      console.log(`[DATA] ${ticker}: ${bars.length} bars`);
-      return bars.map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
+      return (d.bars?.[sym] || []).map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
     } else {
-      const url = `${DATA_BASE}/stocks/bars?symbols=${sym}&timeframe=1Day&start=${startStr}&limit=${limit}&feed=iex&adjustment=raw`;
-      console.log(`[DATA] Fetching stock bars: ${url}`);
-      const r = await fetch(url, { headers: HEADERS });
+      const r = await fetch(
+        `${DATA_BASE}/stocks/bars?symbols=${sym}&timeframe=1Hour&limit=${limit}&feed=iex`,
+        { headers: HEADERS }
+      );
       const d = await r.json();
-      const bars = d.bars?.[sym] || [];
-      console.log(`[DATA] ${ticker}: ${bars.length} bars`);
-      return bars.map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
+      return (d.bars?.[sym] || []).map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
     }
   } catch(e) {
     console.error(`[DATA] fetchBars ${ticker}:`, e.message);
@@ -119,26 +110,22 @@ async function fetchLatestPrice(ticker) {
   try {
     const sym = alpacaSym(ticker);
     if (isCrypto(ticker)) {
-      const symEncoded = encodeURIComponent(sym);
-      const url = `${CRYPTO_BASE}/latest/bars?symbols=${symEncoded}`;
-      const r = await fetch(url, { headers: HEADERS });
-      const d = await r.json();
-      return d.bars?.[sym]?.c || null;
-    } else {
       const r = await fetch(
-        `${DATA_BASE}/stocks/bars/latest?symbols=${sym}&feed=iex`,
+        `${DATA_BASE}/crypto/us/latest/bars?symbols=${encodeURIComponent(sym)}`,
         { headers: HEADERS }
       );
       const d = await r.json();
       return d.bars?.[sym]?.c || null;
+    } else {
+      const r = await fetch(
+        `${DATA_BASE}/stocks/trades/latest?symbols=${sym}&feed=iex`,
+        { headers: HEADERS }
+      );
+      const d = await r.json();
+      return d.trades?.[sym]?.p || null;
     }
-  } catch(e) {
-    console.error(`[PRICE] ${ticker}:`, e.message);
-    return null;
-  }
+  } catch { return null; }
 }
-
-
 
 // ── Technical indicators ──────────────────────────────────────────
 function computeRSI(closes, period = 14) {
@@ -189,73 +176,6 @@ function computeEMA(closes, span) {
   return closes.reduce((acc, v, i) => i === 0 ? v : acc * (1-k) + v * k, closes[0]);
 }
 
-// ── Candlestick pattern helpers ──────────────────────────────────
-function isBullishEngulfing(bars) {
-  if (bars.length < 2) return false;
-  const p = bars[bars.length - 2], c = bars[bars.length - 1];
-  return p.c < p.o && c.c > c.o && c.o <= p.c && c.c >= p.o;
-}
-function isBearishEngulfing(bars) {
-  if (bars.length < 2) return false;
-  const p = bars[bars.length - 2], c = bars[bars.length - 1];
-  return p.c > p.o && c.c < c.o && c.o >= p.c && c.c <= p.o;
-}
-function isHammer(b) {
-  const body = Math.abs(b.c - b.o);
-  const lw = Math.min(b.c, b.o) - b.l;
-  const uw = b.h - Math.max(b.c, b.o);
-  return lw > body * 2 && uw < body * 0.5 && body > 0;
-}
-function isShootingStar(b) {
-  const body = Math.abs(b.c - b.o);
-  const uw = b.h - Math.max(b.c, b.o);
-  const lw = Math.min(b.c, b.o) - b.l;
-  return uw > body * 2 && lw < body * 0.5 && body > 0;
-}
-function isDoji(b) {
-  const body = Math.abs(b.c - b.o);
-  const range = b.h - b.l;
-  return range > 0 && body / range < 0.1;
-}
-function isDoubleBottom(closes, lb = 20) {
-  if (closes.length < lb) return false;
-  const s = closes.slice(-lb);
-  const half = Math.floor(lb / 2);
-  const min1 = Math.min(...s.slice(0, half));
-  const min2 = Math.min(...s.slice(half));
-  const mid  = Math.max(...s.slice(s.indexOf(min1), half + s.slice(half).indexOf(min2)));
-  return Math.abs(min1 - min2) / min1 < 0.03 && mid > min1 * 1.02;
-}
-function isDoubleTop(closes, lb = 20) {
-  if (closes.length < lb) return false;
-  const s = closes.slice(-lb);
-  const half = Math.floor(lb / 2);
-  const max1 = Math.max(...s.slice(0, half));
-  const max2 = Math.max(...s.slice(half));
-  const mid  = Math.min(...s.slice(s.indexOf(max1), half + s.slice(half).indexOf(max2)));
-  return Math.abs(max1 - max2) / max1 < 0.03 && mid < max1 * 0.98;
-}
-function isBullishBreakout(closes, lb = 20) {
-  if (closes.length < lb + 1) return false;
-  const resistance = Math.max(...closes.slice(-lb - 1, -1));
-  return closes[closes.length - 1] > resistance * 1.01;
-}
-function isBearishBreakdown(closes, lb = 20) {
-  if (closes.length < lb + 1) return false;
-  const support = Math.min(...closes.slice(-lb - 1, -1));
-  return closes[closes.length - 1] < support * 0.99;
-}
-function isHigherHighs(closes, lb = 10) {
-  if (closes.length < lb) return false;
-  const s = closes.slice(-lb);
-  return s.filter((v, i) => i > 0 && v > s[i-1]).length > lb * 0.6;
-}
-function isLowerLows(closes, lb = 10) {
-  if (closes.length < lb) return false;
-  const s = closes.slice(-lb);
-  return s.filter((v, i) => i > 0 && v < s[i-1]).length > lb * 0.6;
-}
-
 function detectSignal(bars) {
   if (!bars || bars.length < 50)
     return { action:'hold', confidence:0, reasons:['Insufficient data'], rsi:null, price: bars?.[bars.length-1]?.c || 0 };
@@ -266,31 +186,27 @@ function detectSignal(bars) {
   let buyVotes = 0, sellVotes = 0, total = 0;
   const reasons = [];
 
-  // RSI
   const rsi = computeRSI(closes);
   if (rsi !== null) {
     total += 2;
-    if (rsi < config.rsiOversold)        { buyVotes  += 2; reasons.push(`RSI oversold (${rsi.toFixed(1)})`); }
+    if (rsi < config.rsiOversold)     { buyVotes  += 2; reasons.push(`RSI oversold (${rsi.toFixed(1)})`); }
     else if (rsi > config.rsiOverbought) { sellVotes += 2; reasons.push(`RSI overbought (${rsi.toFixed(1)})`); }
   }
 
-  // MACD
   const { macd, signal, macdPrev, signalPrev } = computeMACD(closes);
   if (macd != null) {
     total += 2;
-    if (macdPrev < signalPrev && macd > signal)      { buyVotes  += 2; reasons.push('MACD bullish crossover'); }
+    if (macdPrev < signalPrev && macd > signal)   { buyVotes  += 2; reasons.push('MACD bullish crossover'); }
     else if (macdPrev > signalPrev && macd < signal) { sellVotes += 2; reasons.push('MACD bearish crossover'); }
   }
 
-  // Bollinger Bands
   const { upper, lower } = computeBollinger(closes);
   if (upper != null) {
     total += 2;
-    if (price <= lower)      { buyVotes  += 2; reasons.push('Price at lower Bollinger Band'); }
+    if (price <= lower) { buyVotes  += 2; reasons.push('Price at lower Bollinger Band'); }
     else if (price >= upper) { sellVotes += 2; reasons.push('Price at upper Bollinger Band'); }
   }
 
-  // EMA trend
   const ema20 = computeEMA(closes, 20);
   const ema50 = computeEMA(closes, 50);
   if (ema20 && ema50) {
@@ -299,7 +215,6 @@ function detectSignal(bars) {
     else               { sellVotes += 1; reasons.push('EMA20 below EMA50 (downtrend)'); }
   }
 
-  // Volume spike
   const avgVol  = vols.slice(-20).reduce((a,b) => a+b, 0) / 20;
   const currVol = vols[vols.length - 1];
   if (avgVol > 0 && currVol > avgVol * 1.5) {
@@ -308,24 +223,6 @@ function detectSignal(bars) {
     else                      { sellVotes += 1; reasons.push('Volume spike confirms bearish'); }
   }
 
-  // Candlestick patterns
-  if (isBullishEngulfing(bars))             { total += 2; buyVotes  += 2; reasons.push('Bullish engulfing candle'); }
-  if (isBearishEngulfing(bars))             { total += 2; sellVotes += 2; reasons.push('Bearish engulfing candle'); }
-  if (isHammer(bars[bars.length - 1]))      { total += 1; buyVotes  += 1; reasons.push('Hammer candle (reversal)'); }
-  if (isShootingStar(bars[bars.length-1]))  { total += 1; sellVotes += 1; reasons.push('Shooting star (reversal)'); }
-  if (isDoji(bars[bars.length - 1])) {
-    if (buyVotes > sellVotes)        { total += 1; buyVotes  += 1; reasons.push('Doji confirms bullish bias'); }
-    else if (sellVotes > buyVotes)   { total += 1; sellVotes += 1; reasons.push('Doji confirms bearish bias'); }
-  }
-
-  // Chart patterns
-  if (isDoubleBottom(closes))    { total += 3; buyVotes  += 3; reasons.push('Double bottom pattern'); }
-  if (isDoubleTop(closes))       { total += 3; sellVotes += 3; reasons.push('Double top pattern'); }
-  if (isBullishBreakout(closes)) { total += 2; buyVotes  += 2; reasons.push('Bullish breakout above resistance'); }
-  if (isBearishBreakdown(closes)){ total += 2; sellVotes += 2; reasons.push('Bearish breakdown below support'); }
-  if (isHigherHighs(closes))     { total += 1; buyVotes  += 1; reasons.push('Higher highs trend'); }
-  if (isLowerLows(closes))       { total += 1; sellVotes += 1; reasons.push('Lower lows trend'); }
-
   if (total === 0) return { action:'hold', confidence:0, reasons:['No data'], rsi, price };
 
   const confidence = Math.max(buyVotes, sellVotes) / total;
@@ -333,8 +230,8 @@ function detectSignal(bars) {
   if (buyVotes > sellVotes && confidence >= config.minConfidence) action = 'buy';
   else if (sellVotes > buyVotes && confidence >= config.minConfidence) action = 'sell';
 
-  console.log(`[SIGNAL] ${action.padEnd(4)} conf=${(confidence*100).toFixed(0)}% buy=${buyVotes} sell=${sellVotes}/${total} | ${reasons.slice(0,2).join(', ')}`);
-  return { action, confidence: Math.round(confidence*100)/100, reasons: reasons.length ? reasons : ['No strong signal'], rsi: rsi ? Math.round(rsi*10)/10 : null, price, buyVotes, sellVotes, total };
+  console.log(`[SIGNAL] ${' '.padEnd(12)} action=${action} conf=${(confidence*100).toFixed(0)}% buy=${buyVotes} sell=${sellVotes}/${total}`);
+  return { action, confidence: Math.round(confidence*100)/100, reasons: reasons.length ? reasons : ['No strong signal'], rsi: rsi ? Math.round(rsi*10)/10 : null, price };
 }
 
 // ── Account & position sync ───────────────────────────────────────
@@ -344,34 +241,13 @@ async function refreshAccount() {
   } catch(e) { console.error('[ACCOUNT]', e.message); }
 }
 
-function matchTicker(alpacaSymbol) {
-  // Try exact match first (e.g. AAPL)
-  if (config.tickers.includes(alpacaSymbol)) return alpacaSymbol;
-  // Try CRYPTO_MAP match (e.g. BTC/USD -> BTC-USD)
-  const fromMap = Object.keys(CRYPTO_MAP).find(k => CRYPTO_MAP[k] === alpacaSymbol);
-  if (fromMap) return fromMap;
-  // Try ETHUSD -> ETH-USD (Alpaca sometimes returns without slash)
-  const withDash = alpacaSymbol.replace(/([A-Z]+)(USD)$/, '$1-$2');
-  if (config.tickers.includes(withDash)) return withDash;
-  // Try ETH/USD -> ETH-USD
-  const slashToDash = alpacaSymbol.replace('/', '-');
-  if (config.tickers.includes(slashToDash)) return slashToDash;
-  return null;
-}
-
 async function syncPositions() {
   try {
     const alpacaPos = await alpacaGet('/positions');
-    console.log(`[SYNC] Found ${alpacaPos.length} positions on Alpaca`);
     const synced = {};
     for (const pos of alpacaPos) {
-      console.log(`[SYNC] Raw position symbol: ${pos.symbol}`);
-      const ticker = matchTicker(pos.symbol);
-      if (!ticker) {
-        console.log(`[SYNC] Could not match ${pos.symbol} to watchlist — skipping`);
-        continue;
-      }
-      console.log(`[SYNC] Matched ${pos.symbol} -> ${ticker}`);
+      const ticker = Object.keys(CRYPTO_MAP).find(k => CRYPTO_MAP[k] === pos.symbol) || pos.symbol;
+      if (!config.tickers.includes(ticker)) continue;
       synced[ticker] = {
         shares:        parseFloat(pos.qty),
         avg_cost:      parseFloat(pos.avg_entry_price),
@@ -387,7 +263,6 @@ async function syncPositions() {
       if (!p.synced && !synced[t]) synced[t] = p;
     }
     state.positions = synced;
-    console.log(`[SYNC] Done — ${Object.keys(synced).length} positions loaded`);
   } catch(e) { console.error('[SYNC]', e.message); }
 }
 
@@ -402,30 +277,16 @@ async function executeBuy(ticker, price) {
 
   if (!config.paperMode) {
     try {
-      // Alpaca crypto orders use BTC/USD format with slash
-      const orderSym = isCrypto(ticker)
-        ? alpacaSym(ticker)  // e.g. BTC/USD
-        : ticker;            // e.g. AAPL
-      // For crypto, use qty instead of notional to avoid ambiguity
-      // qty = dollars / price, rounded to 8 decimal places
-      const orderPayload = isCrypto(ticker) ? {
-        symbol:        orderSym,
-        qty:           (config.maxPositionUsd / price).toFixed(8),
+      const order = await alpacaPost('/orders', {
+        symbol:        alpacaSym(ticker),
+        notional:      config.maxPositionUsd.toString(),
         side:          'buy',
         type:          'market',
-        time_in_force: 'gtc',
-      } : {
-        symbol:        orderSym,
-        notional:      config.maxPositionUsd.toFixed(2),
-        side:          'buy',
-        type:          'market',
-        time_in_force: 'day',
-      };
-      console.log(`[ORDER] Placing buy payload: ${JSON.stringify(orderPayload)}`);
-      const order = await alpacaPost('/orders', orderPayload);
-      console.log(`[ORDER] BUY response: status=${order.status} id=${order.id} symbol=${order.symbol} asset_class=${order.asset_class} filled_qty=${order.filled_qty}`);
-      logEntry.status   = order.status || 'submitted';
+        time_in_force: isCrypto(ticker) ? 'gtc' : 'day',
+      });
+      logEntry.status   = 'executed';
       logEntry.order_id = order.id;
+      console.log(`[ORDER] BUY ${ticker} $${config.maxPositionUsd} @ ${price} — order ${order.id}`);
     } catch(e) {
       logEntry.status = `error: ${e.message}`;
       console.error(`[ORDER] BUY ${ticker} failed:`, e.message);
@@ -459,11 +320,7 @@ async function executeSell(ticker, price) {
 
   if (!config.paperMode) {
     try {
-      const sellSym = isCrypto(ticker) ? alpacaSym(ticker) : ticker;  // BTC/USD or AAPL
-      console.log(`[ORDER] Placing sell: symbol=${sellSym}`);
-      // Position endpoint uses BTCUSD format (no slash) even though orders use BTC/USD
-      const positionSym = sellSym.replace('/', '');
-      await alpacaDelete(`/positions/${positionSym}`);
+      await alpacaDelete(`/positions/${encodeURIComponent(alpacaSym(ticker))}`);
       logEntry.status = 'executed';
       console.log(`[ORDER] SELL ${ticker} @ ${price} pnl=${pnl.toFixed(2)}`);
     } catch(e) {
@@ -505,8 +362,8 @@ async function runScan() {
 
       const inPos = ticker in state.positions;
 
-      // Exit logic — only act if we have a valid price
-      if (inPos && price && price > 0) {
+      // Exit logic
+      if (inPos) {
         const pos = state.positions[ticker];
         const pct = (price - pos.avg_cost) / pos.avg_cost * 100;
         if (pct >= config.profitTargetPct) {

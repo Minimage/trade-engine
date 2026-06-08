@@ -15,13 +15,9 @@ const fmtPrice = v => {
   if (n < 1)      return `$${n.toFixed(4)}`;
   return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
-const fmt$ = (v, forceDecimals = false) => {
-  if (v == null) return "—";
-  const n = parseFloat(v);
-  if (forceDecimals && Math.abs(n) < 1 && n !== 0)
-    return `$${n.toFixed(4)}`;
-  return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-};
+const fmt$ = v => v != null
+  ? `$${parseFloat(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  : "—";
 
 // ── Design tokens ─────────────────────────────────────────────────
 const C = {
@@ -155,7 +151,7 @@ function PositionRow({ ticker, pos, onSell }) {
       <span style={{ color: C.text }}>{fmtPrice(pos.current_price)}</span>
       <span style={{ color: C.textDim, fontSize: 11 }}>{pos.shares?.toFixed(6)}</span>
       <span style={{ textAlign: "right", fontWeight: 700, color: up ? C.green : C.red }}>
-        {up ? "+" : ""}{fmt$(pos.pnl, true)} ({up ? "+" : ""}{pos.pnl_pct?.toFixed(2)}%)
+        {up ? "+" : ""}{fmt$(pos.pnl)} ({up ? "+" : ""}{pos.pnl_pct?.toFixed(1)}%)
       </span>
       <button onClick={async () => {
           if (!window.confirm(`Sell all ${displayName(ticker)}?`)) return;
@@ -196,40 +192,6 @@ function TradeRow({ trade }) {
           </span>
       }
     </div>
-  );
-}
-
-// ── Reckless toggle ───────────────────────────────────────────────
-function RecklessToggle({ config, fetcher, API, showToast, refresh }) {
-  const [reckless, setReckless] = useState(config?.minConfidence <= 0.25);
-
-  useEffect(() => {
-    setReckless(config?.minConfidence <= 0.25);
-  }, [config?.minConfidence]);
-
-  const toggle = async () => {
-    const next = !reckless;
-    const newSettings = next
-      ? { minConfidence: 0.25, rsiOversold: 55, rsiOverbought: 45 }
-      : { minConfidence: 0.60, rsiOversold: 38, rsiOverbought: 62 };
-    setReckless(next); // optimistic update
-    await fetcher(`${API}/config`, { method: "POST", body: JSON.stringify(newSettings) });
-    showToast(next ? "🔥 Reckless mode on — trades on almost anything" : "Normal mode on", next ? "error" : "info");
-    refresh();
-  };
-
-  return (
-    <button onClick={toggle} style={{
-      background: reckless ? "#260410" : "none",
-      border: `1px solid ${reckless ? "#FF3D5A" : "#6B829E55"}`,
-      borderRadius: 5, padding: "6px 14px", fontSize: 10, cursor: "pointer",
-      color: reckless ? "#FF3D5A" : "#6B829E",
-      fontWeight: 800, letterSpacing: "0.08em",
-      textTransform: "uppercase", fontFamily: "inherit",
-      transition: "all 0.2s",
-    }}>
-      {reckless ? "🔥 Reckless" : "Reckless mode"}
-    </button>
   );
 }
 
@@ -278,27 +240,9 @@ export default function App() {
 
   useEffect(() => {
     refresh();
-    // Use direct fetch in interval to avoid stale closure issues
-    const id = setInterval(async () => {
-      try {
-        const [s, acc, sig, pos, t, c] = await Promise.all([
-          fetch('/api/status').then(r => r.json()).catch(() => null),
-          fetch('/api/account').then(r => r.json()).catch(() => null),
-          fetch('/api/signals').then(r => r.json()).catch(() => null),
-          fetch('/api/positions').then(r => r.json()).catch(() => null),
-          fetch('/api/trades').then(r => r.json()).catch(() => null),
-          fetch('/api/config').then(r => r.json()).catch(() => null),
-        ]);
-        if (s)   setStatus(s);
-        if (acc) setAccount(acc);
-        if (sig && typeof sig === 'object') setSignals(sig);
-        if (pos) setPositions(pos);
-        if (t)   setTrades(t);
-        if (c)   { setConfig(c); setEditConfig(c); }
-      } catch(e) { console.error('Poll error:', e); }
-    }, 5000);
+    const id = setInterval(refresh, 10000);
     return () => clearInterval(id);
-  }, []);
+  }, [refresh]);
 
   const handleScan = async () => {
     setScanning(true);
@@ -423,7 +367,7 @@ export default function App() {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 8, marginBottom: 18 }}>
         <Metric label="Positions"     value={Object.keys(positions).length} />
         <Metric label="Unrealized P&L"
-          value={`${totalPnl >= 0 ? "+" : ""}${fmt$(totalPnl, true)}`}
+          value={`${totalPnl >= 0 ? "+" : ""}${fmt$(totalPnl)}`}
           color={totalPnl >= 0 ? C.green : C.red} />
         <Metric label="Buy signals"   value={buySignals} color={buySignals > 0 ? C.green : C.text} />
         <Metric label="Trades"        value={trades.length} />
@@ -460,7 +404,6 @@ export default function App() {
               .then(() => { showToast("Positions synced", "success"); refresh(); })}>
               Sync positions
             </Btn>
-            <RecklessToggle config={config} fetcher={fetcher} API={API} showToast={showToast} refresh={refresh} />
           </div>
 
           <Card style={{ marginBottom: 12 }}>
