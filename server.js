@@ -86,10 +86,14 @@ async function alpacaDelete(path) {
 async function fetchBars(ticker, limit = 200) {
   try {
     const sym = alpacaSym(ticker);
+    // Use a start date 6 months back to get enough history for indicators
+    const start = new Date();
+    start.setMonth(start.getMonth() - 6);
+    const startStr = start.toISOString().split('T')[0];
+
     if (isCrypto(ticker)) {
-      // Crypto uses v1beta3 endpoint
       const symEncoded = encodeURIComponent(sym);
-      const url = `${CRYPTO_BASE}/bars?symbols=${symEncoded}&timeframe=1Day&limit=${limit}`;
+      const url = `${CRYPTO_BASE}/bars?symbols=${symEncoded}&timeframe=1Day&start=${startStr}&limit=${limit}`;
       console.log(`[DATA] Fetching crypto bars: ${url}`);
       const r = await fetch(url, { headers: HEADERS });
       const d = await r.json();
@@ -97,8 +101,7 @@ async function fetchBars(ticker, limit = 200) {
       console.log(`[DATA] ${ticker}: ${bars.length} bars`);
       return bars.map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
     } else {
-      // Stocks use v2 with IEX feed (free tier)
-      const url = `${DATA_BASE}/stocks/bars?symbols=${sym}&timeframe=1Day&limit=${limit}&feed=iex&adjustment=raw`;
+      const url = `${DATA_BASE}/stocks/bars?symbols=${sym}&timeframe=1Day&start=${startStr}&limit=${limit}&feed=iex&adjustment=raw`;
       console.log(`[DATA] Fetching stock bars: ${url}`);
       const r = await fetch(url, { headers: HEADERS });
       const d = await r.json();
