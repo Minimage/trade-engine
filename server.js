@@ -3,7 +3,7 @@ import cors from 'cors';
 import fetch from 'node-fetch';
 
 const app  = express();
-const PORT = 3002;
+const PORT = 3001;
 
 app.use(cors());
 app.use(express.json());
@@ -86,25 +86,19 @@ async function fetchBars(ticker, limit = 100) {
   try {
     const sym = alpacaSym(ticker);
     if (isCrypto(ticker)) {
-      // Crypto needs more history — use 200 bars to ensure enough for indicators
-      const url = `${DATA_BASE}/crypto/us/bars?symbols=${encodeURIComponent(sym)}&timeframe=1Day&limit=200`;
-      console.log(`[DATA] Fetching crypto bars: ${url}`);
-      const r = await fetch(url, { headers: HEADERS });
+      const r = await fetch(
+        `${DATA_BASE}/crypto/us/bars?symbols=${encodeURIComponent(sym)}&timeframe=1Day&limit=${limit}`,
+        { headers: HEADERS }
+      );
       const d = await r.json();
-      console.log(`[DATA] ${ticker} crypto response keys:`, Object.keys(d));
-      // Alpaca returns bars nested under the symbol
-      const bars = d.bars?.[sym] || d.bars?.[sym.replace('/','%2F')] || [];
-      console.log(`[DATA] ${ticker}: ${bars.length} bars returned`);
-      return bars.map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
+      return (d.bars?.[sym] || []).map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
     } else {
-      // Stocks — use daily bars for more history (hourly can be sparse)
-      const url = `${DATA_BASE}/stocks/bars?symbols=${sym}&timeframe=1Day&limit=200&feed=iex`;
-      console.log(`[DATA] Fetching stock bars: ${url}`);
-      const r = await fetch(url, { headers: HEADERS });
+      const r = await fetch(
+        `${DATA_BASE}/stocks/bars?symbols=${sym}&timeframe=1Hour&limit=${limit}&feed=iex`,
+        { headers: HEADERS }
+      );
       const d = await r.json();
-      const bars = d.bars?.[sym] || [];
-      console.log(`[DATA] ${ticker}: ${bars.length} bars returned`);
-      return bars.map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
+      return (d.bars?.[sym] || []).map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
     }
   } catch(e) {
     console.error(`[DATA] fetchBars ${ticker}:`, e.message);
@@ -116,10 +110,11 @@ async function fetchLatestPrice(ticker) {
   try {
     const sym = alpacaSym(ticker);
     if (isCrypto(ticker)) {
-      const url = `${DATA_BASE}/crypto/us/latest/bars?symbols=${encodeURIComponent(sym)}`;
-      const r = await fetch(url, { headers: HEADERS });
+      const r = await fetch(
+        `${DATA_BASE}/crypto/us/latest/bars?symbols=${encodeURIComponent(sym)}`,
+        { headers: HEADERS }
+      );
       const d = await r.json();
-      console.log(`[PRICE] ${ticker} latest response:`, JSON.stringify(d).slice(0, 200));
       return d.bars?.[sym]?.c || null;
     } else {
       const r = await fetch(
@@ -129,13 +124,8 @@ async function fetchLatestPrice(ticker) {
       const d = await r.json();
       return d.trades?.[sym]?.p || null;
     }
-  } catch(e) {
-    console.error(`[PRICE] ${ticker}:`, e.message);
-    return null;
-  }
+  } catch { return null; }
 }
-
-
 
 // ── Technical indicators ──────────────────────────────────────────
 function computeRSI(closes, period = 14) {
@@ -251,34 +241,13 @@ async function refreshAccount() {
   } catch(e) { console.error('[ACCOUNT]', e.message); }
 }
 
-function matchTicker(alpacaSymbol) {
-  // Try exact match first (e.g. AAPL)
-  if (config.tickers.includes(alpacaSymbol)) return alpacaSymbol;
-  // Try CRYPTO_MAP match (e.g. BTC/USD -> BTC-USD)
-  const fromMap = Object.keys(CRYPTO_MAP).find(k => CRYPTO_MAP[k] === alpacaSymbol);
-  if (fromMap) return fromMap;
-  // Try ETHUSD -> ETH-USD (Alpaca sometimes returns without slash)
-  const withDash = alpacaSymbol.replace(/([A-Z]+)(USD)$/, '$1-$2');
-  if (config.tickers.includes(withDash)) return withDash;
-  // Try ETH/USD -> ETH-USD
-  const slashToDash = alpacaSymbol.replace('/', '-');
-  if (config.tickers.includes(slashToDash)) return slashToDash;
-  return null;
-}
-
 async function syncPositions() {
   try {
     const alpacaPos = await alpacaGet('/positions');
-    console.log(`[SYNC] Found ${alpacaPos.length} positions on Alpaca`);
     const synced = {};
     for (const pos of alpacaPos) {
-      console.log(`[SYNC] Raw position symbol: ${pos.symbol}`);
-      const ticker = matchTicker(pos.symbol);
-      if (!ticker) {
-        console.log(`[SYNC] Could not match ${pos.symbol} to watchlist — skipping`);
-        continue;
-      }
-      console.log(`[SYNC] Matched ${pos.symbol} -> ${ticker}`);
+      const ticker = Object.keys(CRYPTO_MAP).find(k => CRYPTO_MAP[k] === pos.symbol) || pos.symbol;
+      if (!config.tickers.includes(ticker)) continue;
       synced[ticker] = {
         shares:        parseFloat(pos.qty),
         avg_cost:      parseFloat(pos.avg_entry_price),
@@ -294,7 +263,6 @@ async function syncPositions() {
       if (!p.synced && !synced[t]) synced[t] = p;
     }
     state.positions = synced;
-    console.log(`[SYNC] Done — ${Object.keys(synced).length} positions loaded`);
   } catch(e) { console.error('[SYNC]', e.message); }
 }
 
@@ -309,14 +277,9 @@ async function executeBuy(ticker, price) {
 
   if (!config.paperMode) {
     try {
-      // Alpaca crypto orders use symbol without slash e.g. BTCUSD not BTC/USD
-      const orderSym = isCrypto(ticker)
-        ? alpacaSym(ticker).replace('/', '')
-        : ticker;
-      console.log(`[ORDER] Placing buy: symbol=${orderSym} notional=$${config.maxPositionUsd}`);
       const order = await alpacaPost('/orders', {
-        symbol:        orderSym,
-        notional:      config.maxPositionUsd.toFixed(2),
+        symbol:        alpacaSym(ticker),
+        notional:      config.maxPositionUsd.toString(),
         side:          'buy',
         type:          'market',
         time_in_force: isCrypto(ticker) ? 'gtc' : 'day',
@@ -357,9 +320,7 @@ async function executeSell(ticker, price) {
 
   if (!config.paperMode) {
     try {
-      const sellSym = isCrypto(ticker) ? alpacaSym(ticker).replace('/', '') : ticker;
-      console.log(`[ORDER] Placing sell: symbol=${sellSym}`);
-      await alpacaDelete(`/positions/${sellSym}`);
+      await alpacaDelete(`/positions/${encodeURIComponent(alpacaSym(ticker))}`);
       logEntry.status = 'executed';
       console.log(`[ORDER] SELL ${ticker} @ ${price} pnl=${pnl.toFixed(2)}`);
     } catch(e) {
