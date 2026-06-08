@@ -3,14 +3,14 @@ import cors from 'cors';
 import fetch from 'node-fetch';
 
 const app  = express();
-const PORT = 3002;
+const PORT = process.env.PORT || 3002;
 
 app.use(cors());
 app.use(express.json());
 
 // ── Alpaca config ─────────────────────────────────────────────────
-const ALPACA_KEY    = 'PK7FVW3V4B3SIYZ5ILOEEONJPZ';
-const ALPACA_SECRET = 'BRPgtEn6mbM57jirhZ4ftn4fXT8NK4QRugVL8Eaks52u';
+const ALPACA_KEY    = process.env.ALPACA_KEY    || 'PK7FVW3V4B3SIYZ5ILOEEONJPZ';
+const ALPACA_SECRET = process.env.ALPACA_SECRET || 'BRPgtEn6mbM57jirhZ4ftn4fXT8NK4QRugVL8Eaks52u';
 const ALPACA_BASE   = 'https://paper-api.alpaca.markets/v2';
 const DATA_BASE     = 'https://data.alpaca.markets/v2';
 const CRYPTO_BASE   = 'https://data.alpaca.markets/v1beta3/crypto/us';
