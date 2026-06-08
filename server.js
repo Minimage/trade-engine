@@ -31,6 +31,25 @@ const HEADERS = {
   'Content-Type':        'application/json',
 };
 
+// Track pending order symbols to avoid duplicate orders
+const pendingOrders = new Set();
+
+async function isMarketOpen() {
+  try {
+    const r = await fetch(`${ALPACA_BASE}/clock`, { headers: HEADERS });
+    const d = await r.json();
+    return d.is_open === true;
+  } catch { return false; }
+}
+
+async function hasPendingOrder(symbol) {
+  try {
+    const r = await fetch(`${ALPACA_BASE}/orders?status=open&limit=100`, { headers: HEADERS });
+    const orders = await r.json();
+    return orders.some(o => o.symbol === symbol);
+  } catch { return false; }
+}
+
 const CRYPTO_MAP = {
   'BTC-USD':'BTC/USD','ETH-USD':'ETH/USD','SOL-USD':'SOL/USD',
   'XRP-USD':'XRP/USD','DOGE-USD':'DOGE/USD','LTC-USD':'LTC/USD',
@@ -535,11 +554,20 @@ async function runScan() {
       if (!inPos && signal.action === 'buy') {
         const deployed = Object.values(state.positions)
           .reduce((s, p) => s + p.avg_cost * p.shares, 0);
-        if (deployed + config.maxPositionUsd <= config.totalBudgetUsd) {
-          console.log(`[BOT] Buying ${ticker} @ ${price}`);
-          await executeBuy(ticker, price);
-        } else {
+        if (deployed + config.maxPositionUsd > config.totalBudgetUsd) {
           state.signals[ticker].blocked = 'Budget cap reached';
+        } else if (!isCrypto(ticker) && !(await isMarketOpen())) {
+          state.signals[ticker].blocked = 'Market closed';
+          console.log(`[BOT] Market closed — skipping buy for ${ticker}`);
+        } else {
+          const sym = isCrypto(ticker) ? (CRYPTO_MAP[ticker] || ticker.replace('-','/')).replace('/','') : ticker;
+          if (await hasPendingOrder(sym)) {
+            state.signals[ticker].blocked = 'Order already pending';
+            console.log(`[BOT] Pending order exists for ${ticker} — skipping`);
+          } else {
+            console.log(`[BOT] Buying ${ticker} @ ${price}`);
+            await executeBuy(ticker, price);
+          }
         }
       }
     } catch(e) {
