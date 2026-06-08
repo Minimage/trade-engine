@@ -82,23 +82,23 @@ async function alpacaDelete(path) {
 }
 
 // ── Market data ───────────────────────────────────────────────────
-async function fetchBars(ticker, limit = 100) {
+async function fetchBars(ticker, limit = 200) {
   try {
     const sym = alpacaSym(ticker);
     if (isCrypto(ticker)) {
-      // Crypto needs more history — use 200 bars to ensure enough for indicators
-      const url = `${DATA_BASE}/crypto/us/bars?symbols=${encodeURIComponent(sym)}&timeframe=1Day&limit=200`;
+      // Correct Alpaca crypto endpoint — no /us/ in path
+      const symEncoded = encodeURIComponent(sym);
+      const url = `${DATA_BASE}/crypto/bars?symbols=${symEncoded}&timeframe=1Day&limit=${limit}`;
       console.log(`[DATA] Fetching crypto bars: ${url}`);
       const r = await fetch(url, { headers: HEADERS });
       const d = await r.json();
-      console.log(`[DATA] ${ticker} crypto response keys:`, Object.keys(d));
-      // Alpaca returns bars nested under the symbol
-      const bars = d.bars?.[sym] || d.bars?.[sym.replace('/','%2F')] || [];
+      console.log(`[DATA] ${ticker} response keys:`, Object.keys(d));
+      const bars = d.bars?.[sym] || [];
       console.log(`[DATA] ${ticker}: ${bars.length} bars returned`);
       return bars.map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
     } else {
-      // Stocks — use daily bars for more history (hourly can be sparse)
-      const url = `${DATA_BASE}/stocks/bars?symbols=${sym}&timeframe=1Day&limit=200&feed=iex`;
+      // Stocks — remove feed=iex to get full history from SIP feed
+      const url = `${DATA_BASE}/stocks/bars?symbols=${sym}&timeframe=1Day&limit=${limit}`;
       console.log(`[DATA] Fetching stock bars: ${url}`);
       const r = await fetch(url, { headers: HEADERS });
       const d = await r.json();
@@ -116,18 +116,21 @@ async function fetchLatestPrice(ticker) {
   try {
     const sym = alpacaSym(ticker);
     if (isCrypto(ticker)) {
-      const url = `${DATA_BASE}/crypto/us/latest/bars?symbols=${encodeURIComponent(sym)}`;
+      // Correct crypto latest endpoint
+      const symEncoded = encodeURIComponent(sym);
+      const url = `${DATA_BASE}/crypto/latest/bars?symbols=${symEncoded}`;
       const r = await fetch(url, { headers: HEADERS });
       const d = await r.json();
-      console.log(`[PRICE] ${ticker} latest response:`, JSON.stringify(d).slice(0, 200));
+      console.log(`[PRICE] ${ticker}:`, JSON.stringify(d).slice(0, 150));
       return d.bars?.[sym]?.c || null;
     } else {
+      // Stocks latest quote
       const r = await fetch(
-        `${DATA_BASE}/stocks/trades/latest?symbols=${sym}&feed=iex`,
+        `${DATA_BASE}/stocks/quotes/latest?symbols=${sym}`,
         { headers: HEADERS }
       );
       const d = await r.json();
-      return d.trades?.[sym]?.p || null;
+      return d.quotes?.[sym]?.ap || d.quotes?.[sym]?.bp || null;
     }
   } catch(e) {
     console.error(`[PRICE] ${ticker}:`, e.message);
@@ -401,8 +404,8 @@ async function runScan() {
 
       const inPos = ticker in state.positions;
 
-      // Exit logic
-      if (inPos) {
+      // Exit logic — only act if we have a valid price
+      if (inPos && price && price > 0) {
         const pos = state.positions[ticker];
         const pct = (price - pos.avg_cost) / pos.avg_cost * 100;
         if (pct >= config.profitTargetPct) {
