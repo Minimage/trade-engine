@@ -199,6 +199,40 @@ function TradeRow({ trade }) {
   );
 }
 
+// ── Reckless toggle ───────────────────────────────────────────────
+function RecklessToggle({ config, fetcher, API, showToast, refresh }) {
+  const [reckless, setReckless] = useState(config?.minConfidence <= 0.25);
+
+  useEffect(() => {
+    setReckless(config?.minConfidence <= 0.25);
+  }, [config?.minConfidence]);
+
+  const toggle = async () => {
+    const next = !reckless;
+    const newSettings = next
+      ? { minConfidence: 0.25, rsiOversold: 55, rsiOverbought: 45 }
+      : { minConfidence: 0.60, rsiOversold: 38, rsiOverbought: 62 };
+    setReckless(next); // optimistic update
+    await fetcher(`${API}/config`, { method: "POST", body: JSON.stringify(newSettings) });
+    showToast(next ? "🔥 Reckless mode on — trades on almost anything" : "Normal mode on", next ? "error" : "info");
+    refresh();
+  };
+
+  return (
+    <button onClick={toggle} style={{
+      background: reckless ? "#260410" : "none",
+      border: `1px solid ${reckless ? "#FF3D5A" : "#6B829E55"}`,
+      borderRadius: 5, padding: "6px 14px", fontSize: 10, cursor: "pointer",
+      color: reckless ? "#FF3D5A" : "#6B829E",
+      fontWeight: 800, letterSpacing: "0.08em",
+      textTransform: "uppercase", fontFamily: "inherit",
+      transition: "all 0.2s",
+    }}>
+      {reckless ? "🔥 Reckless" : "Reckless mode"}
+    </button>
+  );
+}
+
 // ── Main app ──────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState("overview");
@@ -426,24 +460,7 @@ export default function App() {
               .then(() => { showToast("Positions synced", "success"); refresh(); })}>
               Sync positions
             </Btn>
-            <button onClick={async () => {
-              const isReckless = config?.minConfidence <= 0.25;
-              const newSettings = isReckless
-                ? { minConfidence: 0.60, rsiOversold: 38, rsiOverbought: 62 }
-                : { minConfidence: 0.25, rsiOversold: 55, rsiOverbought: 45 };
-              await fetcher(`${API}/config`, { method: "POST", body: JSON.stringify(newSettings) });
-              showToast(isReckless ? "Normal mode on" : "🔥 Reckless mode on", isReckless ? "info" : "error");
-              refresh();
-            }} style={{
-              background: config?.minConfidence <= 0.25 ? "#260410" : "none",
-              border: `1px solid ${config?.minConfidence <= 0.25 ? "#FF3D5A" : "#6B829E55"}`,
-              borderRadius: 5, padding: "6px 14px", fontSize: 10, cursor: "pointer",
-              color: config?.minConfidence <= 0.25 ? "#FF3D5A" : "#6B829E",
-              fontWeight: 800, letterSpacing: "0.08em",
-              textTransform: "uppercase", fontFamily: "inherit",
-            }}>
-              {config?.minConfidence <= 0.25 ? "🔥 Reckless" : "Reckless mode"}
-            </button>
+            <RecklessToggle config={config} fetcher={fetcher} API={API} showToast={showToast} refresh={refresh} />
           </div>
 
           <Card style={{ marginBottom: 12 }}>
