@@ -406,17 +406,18 @@ async function executeBuy(ticker, price) {
       const orderSym = isCrypto(ticker)
         ? alpacaSym(ticker)  // e.g. BTC/USD
         : ticker;            // e.g. AAPL
-      console.log(`[ORDER] Placing buy: symbol=${orderSym} notional=$${config.maxPositionUsd}`);
-      const order = await alpacaPost('/orders', {
+      const orderPayload = {
         symbol:        orderSym,
         notional:      config.maxPositionUsd.toFixed(2),
         side:          'buy',
         type:          'market',
         time_in_force: isCrypto(ticker) ? 'gtc' : 'day',
-      });
-      logEntry.status   = 'executed';
+      };
+      console.log(`[ORDER] Placing buy payload: ${JSON.stringify(orderPayload)}`);
+      const order = await alpacaPost('/orders', orderPayload);
+      console.log(`[ORDER] BUY response: status=${order.status} id=${order.id} symbol=${order.symbol} asset_class=${order.asset_class} filled_qty=${order.filled_qty}`);
+      logEntry.status   = order.status || 'submitted';
       logEntry.order_id = order.id;
-      console.log(`[ORDER] BUY ${ticker} $${config.maxPositionUsd} @ ${price} — order ${order.id}`);
     } catch(e) {
       logEntry.status = `error: ${e.message}`;
       console.error(`[ORDER] BUY ${ticker} failed:`, e.message);
