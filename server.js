@@ -406,13 +406,20 @@ async function executeBuy(ticker, price) {
       const orderSym = isCrypto(ticker)
         ? alpacaSym(ticker)  // e.g. BTC/USD
         : ticker;            // e.g. AAPL
-      const orderPayload = {
+      // For crypto, use qty instead of notional to avoid ambiguity
+      // qty = dollars / price, rounded to 8 decimal places
+      const orderPayload = isCrypto(ticker) ? {
+        symbol:        orderSym,
+        qty:           (config.maxPositionUsd / price).toFixed(8),
+        side:          'buy',
+        type:          'market',
+        time_in_force: 'gtc',
+      } : {
         symbol:        orderSym,
         notional:      config.maxPositionUsd.toFixed(2),
         side:          'buy',
         type:          'market',
-        time_in_force: isCrypto(ticker) ? 'gtc' : 'day',
-        ...(isCrypto(ticker) ? { asset_class: 'crypto' } : {}),
+        time_in_force: 'day',
       };
       console.log(`[ORDER] Placing buy payload: ${JSON.stringify(orderPayload)}`);
       const order = await alpacaPost('/orders', orderPayload);
