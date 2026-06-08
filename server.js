@@ -44,7 +44,7 @@ let state = {
 };
 
 let config = {
-  tickers: ['AAPL','MSFT','NVDA','TSLA','BTC-USD','ETH-USD','SOL-USD',
+  tickers: ['AAPL','MSFT','NVDA','TSLA','ETH-USD','SOL-USD',
             'XRP-USD','DOGE-USD','AVAX-USD','LINK-USD','LTC-USD'],
   maxPositionUsd:  20,
   totalBudgetUsd:  500,
