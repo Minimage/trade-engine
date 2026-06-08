@@ -412,6 +412,7 @@ async function executeBuy(ticker, price) {
         side:          'buy',
         type:          'market',
         time_in_force: isCrypto(ticker) ? 'gtc' : 'day',
+        ...(isCrypto(ticker) ? { asset_class: 'crypto' } : {}),
       };
       console.log(`[ORDER] Placing buy payload: ${JSON.stringify(orderPayload)}`);
       const order = await alpacaPost('/orders', orderPayload);
