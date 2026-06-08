@@ -13,6 +13,7 @@ const ALPACA_KEY    = 'PK7FVW3V4B3SIYZ5ILOEEONJPZ';
 const ALPACA_SECRET = 'BRPgtEn6mbM57jirhZ4ftn4fXT8NK4QRugVL8Eaks52u';
 const ALPACA_BASE   = 'https://paper-api.alpaca.markets/v2';
 const DATA_BASE     = 'https://data.alpaca.markets/v2';
+const CRYPTO_BASE   = 'https://data.alpaca.markets/v1beta3/crypto/us';
 
 const HEADERS = {
   'APCA-API-KEY-ID':     ALPACA_KEY,
@@ -86,24 +87,23 @@ async function fetchBars(ticker, limit = 200) {
   try {
     const sym = alpacaSym(ticker);
     if (isCrypto(ticker)) {
-      // Correct Alpaca crypto endpoint — no /us/ in path
+      // Crypto uses v1beta3 endpoint
       const symEncoded = encodeURIComponent(sym);
-      const url = `${DATA_BASE}/crypto/bars?symbols=${symEncoded}&timeframe=1Day&limit=${limit}`;
+      const url = `${CRYPTO_BASE}/bars?symbols=${symEncoded}&timeframe=1Day&limit=${limit}`;
       console.log(`[DATA] Fetching crypto bars: ${url}`);
       const r = await fetch(url, { headers: HEADERS });
       const d = await r.json();
-      console.log(`[DATA] ${ticker} response keys:`, Object.keys(d));
       const bars = d.bars?.[sym] || [];
-      console.log(`[DATA] ${ticker}: ${bars.length} bars returned`);
+      console.log(`[DATA] ${ticker}: ${bars.length} bars`);
       return bars.map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
     } else {
-      // Stocks — remove feed=iex to get full history from SIP feed
-      const url = `${DATA_BASE}/stocks/bars?symbols=${sym}&timeframe=1Day&limit=${limit}`;
+      // Stocks use v2 with IEX feed (free tier)
+      const url = `${DATA_BASE}/stocks/bars?symbols=${sym}&timeframe=1Day&limit=${limit}&feed=iex&adjustment=raw`;
       console.log(`[DATA] Fetching stock bars: ${url}`);
       const r = await fetch(url, { headers: HEADERS });
       const d = await r.json();
       const bars = d.bars?.[sym] || [];
-      console.log(`[DATA] ${ticker}: ${bars.length} bars returned`);
+      console.log(`[DATA] ${ticker}: ${bars.length} bars`);
       return bars.map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v }));
     }
   } catch(e) {
@@ -116,21 +116,18 @@ async function fetchLatestPrice(ticker) {
   try {
     const sym = alpacaSym(ticker);
     if (isCrypto(ticker)) {
-      // Correct crypto latest endpoint
       const symEncoded = encodeURIComponent(sym);
-      const url = `${DATA_BASE}/crypto/latest/bars?symbols=${symEncoded}`;
+      const url = `${CRYPTO_BASE}/latest/bars?symbols=${symEncoded}`;
       const r = await fetch(url, { headers: HEADERS });
       const d = await r.json();
-      console.log(`[PRICE] ${ticker}:`, JSON.stringify(d).slice(0, 150));
       return d.bars?.[sym]?.c || null;
     } else {
-      // Stocks latest quote
       const r = await fetch(
-        `${DATA_BASE}/stocks/quotes/latest?symbols=${sym}`,
+        `${DATA_BASE}/stocks/bars/latest?symbols=${sym}&feed=iex`,
         { headers: HEADERS }
       );
       const d = await r.json();
-      return d.quotes?.[sym]?.ap || d.quotes?.[sym]?.bp || null;
+      return d.bars?.[sym]?.c || null;
     }
   } catch(e) {
     console.error(`[PRICE] ${ticker}:`, e.message);
