@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently \"nodemon server.js\" \"vite\""
+    "dev": "concurrently \"nodemon server.js\" \"vite\"",
     "build": "vite build",
     "start": "node server.js"
   },
