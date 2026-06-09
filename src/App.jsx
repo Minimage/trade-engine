@@ -243,6 +243,7 @@ export default function App() {
   const [trades, setTrades] = useState([]);
   const [config, setConfig] = useState(null);
   const [editConfig, setEditConfig] = useState({});
+  const [isEditingConfig, setIsEditingConfig] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [toast, setToast] = useState(null);
 
@@ -294,7 +295,7 @@ export default function App() {
         if (sig && typeof sig === 'object') setSignals(sig);
         if (pos) setPositions(pos);
         if (t)   setTrades(t);
-        if (c)   { setConfig(c); setEditConfig(c); }
+        if (c)   { setConfig(c); setEditConfig(prev => isEditingConfig ? prev : c); }
       } catch(e) { console.error('Poll error:', e); }
     }, 5000);
     return () => clearInterval(id);
@@ -310,6 +311,7 @@ export default function App() {
   };
 
   const handleSaveConfig = async () => {
+    setIsEditingConfig(false);
     const payload = { ...editConfig };
     if (typeof payload.tickers === "string")
       payload.tickers = payload.tickers.split(",").map(t => t.trim().toUpperCase()).filter(Boolean);
@@ -599,10 +601,10 @@ export default function App() {
                   const active = parseFloat(editConfig.minConfidence) === p.confidence
                     && parseFloat(editConfig.rsiOversold) === p.oversold;
                   return (
-                    <button key={p.label} onClick={() => setEditConfig(e => ({
+                    <button key={p.label} onClick={() => { setIsEditingConfig(true); setEditConfig(e => ({
                       ...e, minConfidence: p.confidence,
                       rsiOversold: p.oversold, rsiOverbought: p.overbought,
-                    }))} style={{
+                    })); }}} style={{
                       background: active ? `${p.color}11` : C.surface2,
                       border: `1px solid ${active ? p.color : C.border}`,
                       borderRadius: 5, padding: "10px 8px",
@@ -627,7 +629,7 @@ export default function App() {
                     <p style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase",
                       letterSpacing: "0.1em", color: C.textMuted, margin: "0 0 5px" }}>{f.label}</p>
                     <input type="number" step={f.step || "1"} value={editConfig[f.key] ?? ""}
-                      onChange={e => setEditConfig(p => ({ ...p, [f.key]: e.target.value }))}
+                      onChange={e => { setIsEditingConfig(true); setEditConfig(p => ({ ...p, [f.key]: e.target.value })); }}
                       style={inp} />
                   </div>
                 ))}
@@ -665,7 +667,7 @@ export default function App() {
                   <p style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase",
                     letterSpacing: "0.1em", color: C.textMuted, margin: "0 0 6px" }}>{f.label}</p>
                   <input type="number" step={f.step} value={editConfig[f.key] ?? ""}
-                    onChange={e => setEditConfig(p => ({ ...p, [f.key]: e.target.value }))}
+                    onChange={e => { setIsEditingConfig(true); setEditConfig(p => ({ ...p, [f.key]: e.target.value })); }}
                     style={inp} />
                 </div>
               ))}
@@ -688,7 +690,7 @@ export default function App() {
                   <p style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase",
                     letterSpacing: "0.1em", color: C.textMuted, margin: "0 0 6px" }}>{f.label}</p>
                   <input type="number" step={f.step || "1"} value={editConfig[f.key] ?? ""}
-                    onChange={e => setEditConfig(p => ({ ...p, [f.key]: e.target.value }))}
+                    onChange={e => { setIsEditingConfig(true); setEditConfig(p => ({ ...p, [f.key]: e.target.value })); }}
                     style={inp} />
                 </div>
               ))}

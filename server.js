@@ -70,6 +70,7 @@ let state = {
   positions:  {},
   trades:     [],
   account:    null,
+  startupScans: 0,  // track scans since startup — don't sell on first 2 scans
 };
 
 let config = {
@@ -534,8 +535,8 @@ async function runScan() {
 
       const inPos = ticker in state.positions;
 
-      // Exit logic — only act if we have a valid price
-      if (inPos && price && price > 0) {
+      // Exit logic — skip selling on first 2 scans after startup to avoid selling on restart
+      if (inPos && price && price > 0 && state.startupScans > 2) {
         const pos = state.positions[ticker];
         const pct = (price - pos.avg_cost) / pos.avg_cost * 100;
         if (pct >= config.profitTargetPct) {
@@ -578,7 +579,8 @@ async function runScan() {
   await syncPositions();
   await refreshAccount();
   state.lastScan = new Date().toISOString();
-  console.log(`[SCAN] Done — ${Object.keys(state.signals).length} signals, ${Object.keys(state.positions).length} positions`);
+  state.startupScans++;
+  console.log(`[SCAN] Done — ${Object.keys(state.signals).length} signals, ${Object.keys(state.positions).length} positions (scan #${state.startupScans})`);
 }
 
 // ── API routes ────────────────────────────────────────────────────
