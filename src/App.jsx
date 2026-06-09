@@ -15,9 +15,13 @@ const fmtPrice = v => {
   if (n < 1)      return `$${n.toFixed(4)}`;
   return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
-const fmt$ = v => v != null
-  ? `$${parseFloat(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-  : "—";
+const fmt$ = (v, forceDecimals = false) => {
+  if (v == null) return "—";
+  const n = parseFloat(v);
+  if (forceDecimals && Math.abs(n) < 1 && n !== 0)
+    return `$${n.toFixed(4)}`;
+  return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+};
 
 // ── Design tokens ─────────────────────────────────────────────────
 const C = {
@@ -151,7 +155,7 @@ function PositionRow({ ticker, pos, onSell }) {
       <span style={{ color: C.text }}>{fmtPrice(pos.current_price)}</span>
       <span style={{ color: C.textDim, fontSize: 11 }}>{pos.shares?.toFixed(6)}</span>
       <span style={{ textAlign: "right", fontWeight: 700, color: up ? C.green : C.red }}>
-        {up ? "+" : ""}{fmt$(pos.pnl)} ({up ? "+" : ""}{pos.pnl_pct?.toFixed(1)}%)
+        {up ? "+" : ""}{fmt$(pos.pnl, true)} ({up ? "+" : ""}{pos.pnl_pct?.toFixed(2)}%)
       </span>
       <button onClick={async () => {
           if (!window.confirm(`Sell all ${displayName(ticker)}?`)) return;
@@ -195,6 +199,40 @@ function TradeRow({ trade }) {
   );
 }
 
+// ── Reckless toggle ───────────────────────────────────────────────
+function RecklessToggle({ config, fetcher, API, showToast, refresh }) {
+  const [reckless, setReckless] = useState(config?.minConfidence <= 0.25);
+
+  useEffect(() => {
+    setReckless(config?.minConfidence <= 0.25);
+  }, [config?.minConfidence]);
+
+  const toggle = async () => {
+    const next = !reckless;
+    const newSettings = next
+      ? { minConfidence: 0.25, rsiOversold: 55, rsiOverbought: 45 }
+      : { minConfidence: 0.60, rsiOversold: 38, rsiOverbought: 62 };
+    setReckless(next); // optimistic update
+    await fetcher(`${API}/config`, { method: "POST", body: JSON.stringify(newSettings) });
+    showToast(next ? "🔥 Reckless mode on — trades on almost anything" : "Normal mode on", next ? "error" : "info");
+    refresh();
+  };
+
+  return (
+    <button onClick={toggle} style={{
+      background: reckless ? "#260410" : "none",
+      border: `1px solid ${reckless ? "#FF3D5A" : "#6B829E55"}`,
+      borderRadius: 5, padding: "6px 14px", fontSize: 10, cursor: "pointer",
+      color: reckless ? "#FF3D5A" : "#6B829E",
+      fontWeight: 800, letterSpacing: "0.08em",
+      textTransform: "uppercase", fontFamily: "inherit",
+      transition: "all 0.2s",
+    }}>
+      {reckless ? "🔥 Reckless" : "Reckless mode"}
+    </button>
+  );
+}
+
 // ── Main app ──────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState("overview");
@@ -205,6 +243,7 @@ export default function App() {
   const [trades, setTrades] = useState([]);
   const [config, setConfig] = useState(null);
   const [editConfig, setEditConfig] = useState({});
+  const [isEditingConfig, setIsEditingConfig] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [toast, setToast] = useState(null);
 
@@ -240,9 +279,27 @@ export default function App() {
 
   useEffect(() => {
     refresh();
-    const id = setInterval(refresh, 10000);
+    // Use direct fetch in interval to avoid stale closure issues
+    const id = setInterval(async () => {
+      try {
+        const [s, acc, sig, pos, t, c] = await Promise.all([
+          fetch('/api/status').then(r => r.json()).catch(() => null),
+          fetch('/api/account').then(r => r.json()).catch(() => null),
+          fetch('/api/signals').then(r => r.json()).catch(() => null),
+          fetch('/api/positions').then(r => r.json()).catch(() => null),
+          fetch('/api/trades').then(r => r.json()).catch(() => null),
+          fetch('/api/config').then(r => r.json()).catch(() => null),
+        ]);
+        if (s)   setStatus(s);
+        if (acc) setAccount(acc);
+        if (sig && typeof sig === 'object') setSignals(sig);
+        if (pos) setPositions(pos);
+        if (t)   setTrades(t);
+        if (c)   { setConfig(c); setEditConfig(prev => isEditingConfig ? prev : c); }
+      } catch(e) { console.error('Poll error:', e); }
+    }, 5000);
     return () => clearInterval(id);
-  }, [refresh]);
+  }, []);
 
   const handleScan = async () => {
     setScanning(true);
@@ -254,6 +311,7 @@ export default function App() {
   };
 
   const handleSaveConfig = async () => {
+    setIsEditingConfig(false);
     const payload = { ...editConfig };
     if (typeof payload.tickers === "string")
       payload.tickers = payload.tickers.split(",").map(t => t.trim().toUpperCase()).filter(Boolean);
@@ -367,7 +425,7 @@ export default function App() {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 8, marginBottom: 18 }}>
         <Metric label="Positions"     value={Object.keys(positions).length} />
         <Metric label="Unrealized P&L"
-          value={`${totalPnl >= 0 ? "+" : ""}${fmt$(totalPnl)}`}
+          value={`${totalPnl >= 0 ? "+" : ""}${fmt$(totalPnl, true)}`}
           color={totalPnl >= 0 ? C.green : C.red} />
         <Metric label="Buy signals"   value={buySignals} color={buySignals > 0 ? C.green : C.text} />
         <Metric label="Trades"        value={trades.length} />
@@ -404,6 +462,7 @@ export default function App() {
               .then(() => { showToast("Positions synced", "success"); refresh(); })}>
               Sync positions
             </Btn>
+            <RecklessToggle config={config} fetcher={fetcher} API={API} showToast={showToast} refresh={refresh} />
           </div>
 
           <Card style={{ marginBottom: 12 }}>
@@ -542,10 +601,10 @@ export default function App() {
                   const active = parseFloat(editConfig.minConfidence) === p.confidence
                     && parseFloat(editConfig.rsiOversold) === p.oversold;
                   return (
-                    <button key={p.label} onClick={() => setEditConfig(e => ({
+                    <button key={p.label} onClick={() => { setIsEditingConfig(true); setEditConfig(e => ({
                       ...e, minConfidence: p.confidence,
                       rsiOversold: p.oversold, rsiOverbought: p.overbought,
-                    }))} style={{
+                    })); }}} style={{
                       background: active ? `${p.color}11` : C.surface2,
                       border: `1px solid ${active ? p.color : C.border}`,
                       borderRadius: 5, padding: "10px 8px",
@@ -570,7 +629,7 @@ export default function App() {
                     <p style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase",
                       letterSpacing: "0.1em", color: C.textMuted, margin: "0 0 5px" }}>{f.label}</p>
                     <input type="number" step={f.step || "1"} value={editConfig[f.key] ?? ""}
-                      onChange={e => setEditConfig(p => ({ ...p, [f.key]: e.target.value }))}
+                      onChange={e => { setIsEditingConfig(true); setEditConfig(p => ({ ...p, [f.key]: e.target.value })); }}
                       style={inp} />
                   </div>
                 ))}
@@ -608,7 +667,7 @@ export default function App() {
                   <p style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase",
                     letterSpacing: "0.1em", color: C.textMuted, margin: "0 0 6px" }}>{f.label}</p>
                   <input type="number" step={f.step} value={editConfig[f.key] ?? ""}
-                    onChange={e => setEditConfig(p => ({ ...p, [f.key]: e.target.value }))}
+                    onChange={e => { setIsEditingConfig(true); setEditConfig(p => ({ ...p, [f.key]: e.target.value })); }}
                     style={inp} />
                 </div>
               ))}
@@ -631,7 +690,7 @@ export default function App() {
                   <p style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase",
                     letterSpacing: "0.1em", color: C.textMuted, margin: "0 0 6px" }}>{f.label}</p>
                   <input type="number" step={f.step || "1"} value={editConfig[f.key] ?? ""}
-                    onChange={e => setEditConfig(p => ({ ...p, [f.key]: e.target.value }))}
+                    onChange={e => { setIsEditingConfig(true); setEditConfig(p => ({ ...p, [f.key]: e.target.value })); }}
                     style={inp} />
                 </div>
               ))}
