@@ -70,7 +70,9 @@ let state = {
   positions:  {},
   trades:     [],
   account:    null,
-  startupScans: 0,  // track scans since startup — don't sell on first 2 scans
+  startupScans: 0,
+  cooldowns:  {},   // ticker -> { until: timestamp, reason: string }
+  ranges:     {},   // ticker -> { support, resistance, isRanging }
 };
 
 let config = {
@@ -284,6 +286,69 @@ function isLowerLows(closes, lb = 10) {
   if (closes.length < lb) return false;
   const s = closes.slice(-lb);
   return s.filter((v, i) => i > 0 && v < s[i-1]).length > lb * 0.6;
+}
+
+// ── Range detection ──────────────────────────────────────────────
+function detectRange(bars, lookback = 30) {
+  if (bars.length < lookback) return { isRanging: false };
+  const slice = bars.slice(-lookback);
+  const closes = slice.map(b => b.c);
+  const highs  = slice.map(b => b.h);
+  const lows   = slice.map(b => b.l);
+
+  // Find support (average of bottom 25% of lows) and resistance (average of top 25% of highs)
+  const sortedLows  = [...lows].sort((a,b) => a-b);
+  const sortedHighs = [...highs].sort((a,b) => b-a);
+  const quarter = Math.floor(lookback / 4);
+  const support    = sortedLows.slice(0, quarter).reduce((a,b) => a+b, 0) / quarter;
+  const resistance = sortedHighs.slice(0, quarter).reduce((a,b) => a+b, 0) / quarter;
+  const rangeSize  = (resistance - support) / support;
+
+  // Check if price has been bouncing — multiple touches of support and resistance
+  let supportTouches    = 0;
+  let resistanceTouches = 0;
+  const supportZone    = support * 1.02;    // within 2% of support
+  const resistanceZone = resistance * 0.98; // within 2% of resistance
+
+  for (const bar of slice) {
+    if (bar.l <= supportZone)    supportTouches++;
+    if (bar.h >= resistanceZone) resistanceTouches++;
+  }
+
+  // It's ranging if:
+  // - Range is between 3% and 20% (not too tight, not trending strongly)
+  // - At least 3 touches of both support and resistance
+  const isRanging = rangeSize >= 0.03 && rangeSize <= 0.20
+    && supportTouches >= 3 && resistanceTouches >= 3;
+
+  return { isRanging, support, resistance, rangeSize, supportTouches, resistanceTouches };
+}
+
+// ── Trend reversal detection (for cooldown recovery) ─────────────
+function isTrendReversing(bars) {
+  if (bars.length < 50) return false;
+  const closes = bars.map(b => b.c);
+  const rsi    = computeRSI(closes);
+  const ema20  = computeEMA(closes, 20);
+  const ema50  = computeEMA(closes, 50);
+
+  // Signs of reversal:
+  // 1. RSI recovering from oversold (crossed back above 35)
+  // 2. EMA20 starting to turn up (last 3 closes above EMA20)
+  // 3. Recent price action making higher lows
+  const rsiRecovering = rsi !== null && rsi > 35 && rsi < 55;
+  const priceAboveEma20 = ema20 && closes[closes.length-1] > ema20;
+  const ema20AboveEma50 = ema20 && ema50 && ema20 > ema50;
+
+  // Higher lows in last 10 bars
+  const recent = closes.slice(-10);
+  const lows   = [];
+  for (let i = 1; i < recent.length - 1; i++) {
+    if (recent[i] < recent[i-1] && recent[i] < recent[i+1]) lows.push(recent[i]);
+  }
+  const higherLows = lows.length >= 2 && lows[lows.length-1] > lows[lows.length-2];
+
+  return rsiRecovering && priceAboveEma20 && (ema20AboveEma50 || higherLows);
 }
 
 function detectSignal(bars) {
@@ -539,33 +604,81 @@ async function runScan() {
       if (inPos && price && price > 0 && state.startupScans > 2) {
         const pos = state.positions[ticker];
         const pct = (price - pos.avg_cost) / pos.avg_cost * 100;
-        if (pct >= config.profitTargetPct) {
-          console.log(`[BOT] Selling ${ticker} — profit target hit (+${pct.toFixed(1)}%)`);
+        const range = state.ranges[ticker];
+        const posIsRanging = range?.isRanging && pos.avg_cost <= range.support * 1.03;
+
+        // Determine profit target — use range resistance if in range mode, else fixed %
+        const profitTarget = posIsRanging && range?.resistance
+          ? (range.resistance - pos.avg_cost) / pos.avg_cost * 100
+          : config.profitTargetPct;
+
+        if (pct >= profitTarget) {
+          const reason = posIsRanging ? `range resistance hit ($${range.resistance?.toFixed(4)})` : `profit target (+${pct.toFixed(1)}%)`;
+          console.log(`[BOT] Selling ${ticker} — ${reason}`);
           await executeSell(ticker, price);
         } else if (pct <= -config.stopLossPct) {
-          console.log(`[BOT] Selling ${ticker} — stop loss hit (${pct.toFixed(1)}%)`);
+          console.log(`[BOT] Selling ${ticker} — stop loss hit (${pct.toFixed(1)}%) — adding cooldown`);
+          // Add cooldown — don't re-enter for 30 minutes unless trend reverses
+          state.cooldowns[ticker] = {
+            until:  Date.now() + 30 * 60 * 1000,
+            reason: `stop loss @ $${price?.toFixed(4)}`,
+          };
           await executeSell(ticker, price);
-        } else if (signal.action === 'sell') {
+        } else if (signal.action === 'sell' && !posIsRanging) {
+          // In range mode, don't sell on signal — wait for resistance
           console.log(`[BOT] Selling ${ticker} — sell signal`);
           await executeSell(ticker, price);
         }
       }
 
+      // Detect range for this ticker
+      const rangeInfo = detectRange(bars);
+      state.ranges[ticker] = rangeInfo;
+
+      // Check cooldown
+      const cooldown = state.cooldowns[ticker];
+      const onCooldown = cooldown && Date.now() < cooldown.until;
+
+      // If on cooldown, check if trend is reversing — if so, lift cooldown early
+      if (onCooldown) {
+        if (isTrendReversing(bars)) {
+          console.log(`[BOT] ${ticker} trend reversing — lifting cooldown early`);
+          delete state.cooldowns[ticker];
+        } else {
+          const remaining = Math.round((cooldown.until - Date.now()) / 60000);
+          state.signals[ticker].blocked = `Cooldown: ${cooldown.reason} (${remaining}m left)`;
+        }
+      }
+
       // Entry logic
-      if (!inPos && signal.action === 'buy') {
+      const stillOnCooldown = state.cooldowns[ticker] && Date.now() < state.cooldowns[ticker].until;
+
+      if (!inPos && !stillOnCooldown) {
         const deployed = Object.values(state.positions)
           .reduce((s, p) => s + p.avg_cost * p.shares, 0);
+
         if (deployed + config.maxPositionUsd > config.totalBudgetUsd) {
           state.signals[ticker].blocked = 'Budget cap reached';
         } else if (!isCrypto(ticker) && !(await isMarketOpen())) {
           state.signals[ticker].blocked = 'Market closed';
-          console.log(`[BOT] Market closed — skipping buy for ${ticker}`);
         } else {
           const sym = isCrypto(ticker) ? (CRYPTO_MAP[ticker] || ticker.replace('-','/')).replace('/','') : ticker;
           if (await hasPendingOrder(sym)) {
             state.signals[ticker].blocked = 'Order already pending';
-            console.log(`[BOT] Pending order exists for ${ticker} — skipping`);
-          } else {
+          } else if (rangeInfo.isRanging) {
+            // Range trading — buy near support, ignore regular signal
+            const currentPrice = price;
+            const nearSupport  = currentPrice <= rangeInfo.support * 1.02;
+            if (nearSupport) {
+              console.log(`[BOT] ${ticker} RANGE BUY near support $${rangeInfo.support?.toFixed(4)} resistance $${rangeInfo.resistance?.toFixed(4)}`);
+              state.signals[ticker].rangeMode = true;
+              state.signals[ticker].support    = rangeInfo.support;
+              state.signals[ticker].resistance = rangeInfo.resistance;
+              await executeBuy(ticker, price);
+            } else {
+              state.signals[ticker].blocked = `Ranging — waiting for support ($${rangeInfo.support?.toFixed(4)})`;
+            }
+          } else if (signal.action === 'buy') {
             console.log(`[BOT] Buying ${ticker} @ ${price}`);
             await executeBuy(ticker, price);
           }
@@ -604,6 +717,8 @@ app.get('/api/account', (req, res) => {
 });
 
 app.get('/api/signals',   (req, res) => res.json(state.signals));
+app.get('/api/cooldowns', (req, res) => res.json(state.cooldowns));
+app.get('/api/ranges',    (req, res) => res.json(state.ranges));
 app.get('/api/positions', (req, res) => res.json(state.positions));
 app.get('/api/trades',    (req, res) => res.json(state.trades.slice(0, 50)));
 app.get('/api/config',    (req, res) => res.json(config));
