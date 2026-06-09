@@ -700,17 +700,21 @@ async function runScan() {
           if (await hasPendingOrder(sym)) {
             state.signals[ticker].blocked = 'Order already pending';
           } else if (rangeInfo.isRanging) {
-            // Range trading — buy near support, ignore regular signal
-            const currentPrice = price;
-            const nearSupport  = currentPrice <= rangeInfo.support * 1.02;
-            if (nearSupport) {
-              console.log(`[BOT] ${ticker} RANGE BUY near support $${rangeInfo.support?.toFixed(4)} resistance $${rangeInfo.resistance?.toFixed(4)}`);
-              state.signals[ticker].rangeMode = true;
-              state.signals[ticker].support    = rangeInfo.support;
-              state.signals[ticker].resistance = rangeInfo.resistance;
-              await executeBuy(ticker, price);
+            // Range trading — but still respect market hours for stocks
+            if (!isCrypto(ticker) && !(await isMarketOpen())) {
+              state.signals[ticker].blocked = 'Market closed';
             } else {
-              state.signals[ticker].blocked = `Ranging — waiting for support ($${rangeInfo.support?.toFixed(4)})`;
+              const currentPrice = price;
+              const nearSupport  = currentPrice <= rangeInfo.support * 1.02;
+              if (nearSupport) {
+                console.log(`[BOT] ${ticker} RANGE BUY near support $${rangeInfo.support?.toFixed(4)} resistance $${rangeInfo.resistance?.toFixed(4)}`);
+                state.signals[ticker].rangeMode = true;
+                state.signals[ticker].support    = rangeInfo.support;
+                state.signals[ticker].resistance = rangeInfo.resistance;
+                await executeBuy(ticker, price);
+              } else {
+                state.signals[ticker].blocked = `Ranging — waiting for support ($${rangeInfo.support?.toFixed(4)})`;
+              }
             }
           } else if (signal.action === 'buy') {
             console.log(`[BOT] Buying ${ticker} @ ${price}`);
