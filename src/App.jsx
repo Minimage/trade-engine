@@ -604,7 +604,7 @@ export default function App() {
                     <button key={p.label} onClick={() => { setIsEditingConfig(true); setEditConfig(e => ({
                       ...e, minConfidence: p.confidence,
                       rsiOversold: p.oversold, rsiOverbought: p.overbought,
-                    })); }}} style={{
+                    })); }} style={{
                       background: active ? `${p.color}11` : C.surface2,
                       border: `1px solid ${active ? p.color : C.border}`,
                       borderRadius: 5, padding: "10px 8px",
