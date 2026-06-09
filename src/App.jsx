@@ -117,9 +117,9 @@ function SignalRow({ ticker, signal, onBuy }) {
       </div>
       <span style={{ color: C.text, fontVariantNumeric: "tabular-nums" }}>{fmtPrice(signal.price)}</span>
       <span style={{ color: C.textDim, fontSize: 11 }}>{signal.rsi?.toFixed(1) || "—"}</span>
-      <span style={{ fontSize: 10, color: C.textDim, overflow: "hidden",
+      <span style={{ fontSize: 10, color: signal.blocked ? C.amber : signal.rangeMode ? C.purple : C.textDim, overflow: "hidden",
         textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {signal.blocked ? `⚠ ${signal.blocked}` : signal.reasons?.[0] || "—"}
+        {signal.blocked ? `⚠ ${signal.blocked}` : signal.rangeMode ? `↔ Range $${signal.support?.toFixed(3)}–$${signal.resistance?.toFixed(3)}` : signal.reasons?.[0] || "—"}
       </span>
       <Pill label={signal.action} variant={signal.action} />
       <span style={{ textAlign: "right", fontSize: 11, fontWeight: 700, color: confColor }}>
@@ -242,6 +242,8 @@ export default function App() {
   const [positions, setPositions] = useState({});
   const [trades, setTrades] = useState([]);
   const [config, setConfig] = useState(null);
+  const [cooldowns, setCooldowns] = useState({});
+  const [ranges, setRanges] = useState({});
   const [editConfig, setEditConfig] = useState({});
   const isEditingConfig = useRef(false);
   const [scanning, setScanning] = useState(false);
@@ -260,7 +262,7 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [s, acc, sig, pos, t, c] = await Promise.all([
+      const [s, acc, sig, pos, t, c, cd, rng] = await Promise.all([
         fetcher(`${API}/status`).catch(() => null),
         fetcher(`${API}/account`).catch(() => null),
         fetcher(`${API}/signals`).catch(() => null),
@@ -282,13 +284,15 @@ export default function App() {
     // Use direct fetch in interval to avoid stale closure issues
     const id = setInterval(async () => {
       try {
-        const [s, acc, sig, pos, t, c] = await Promise.all([
+        const [s, acc, sig, pos, t, c, cd, rng] = await Promise.all([
           fetch('/api/status').then(r => r.json()).catch(() => null),
           fetch('/api/account').then(r => r.json()).catch(() => null),
           fetch('/api/signals').then(r => r.json()).catch(() => null),
           fetch('/api/positions').then(r => r.json()).catch(() => null),
           fetch('/api/trades').then(r => r.json()).catch(() => null),
           fetch('/api/config').then(r => r.json()).catch(() => null),
+          fetch('/api/cooldowns').then(r => r.json()).catch(() => null),
+          fetch('/api/ranges').then(r => r.json()).catch(() => null),
         ]);
         if (s)   setStatus(s);
         if (acc) setAccount(acc);
@@ -296,6 +300,8 @@ export default function App() {
         if (pos) setPositions(pos);
         if (t)   setTrades(t);
         if (c)   { setConfig(c); setEditConfig(prev => isEditingConfig.current ? prev : c); }
+        if (cd)  setCooldowns(cd);
+        if (rng) setRanges(rng);
       } catch(e) { console.error('Poll error:', e); }
     }, 5000);
     return () => clearInterval(id);
