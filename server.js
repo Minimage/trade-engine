@@ -147,6 +147,36 @@ async function fetchBars(ticker, limit = 200) {
   }
 }
 
+async function fetch15MinBars(ticker, limit = 200) {
+  // 200 x 15min bars = ~50 hours — 2 days crypto, 8 trading days stocks
+  try {
+    const sym = alpacaSym(ticker);
+    const start = new Date();
+    start.setDate(start.getDate() - 14); // go back 14 days to ensure enough trading bars
+    const startStr = start.toISOString().split('T')[0];
+
+    if (isCrypto(ticker)) {
+      const symEncoded = encodeURIComponent(sym);
+      const url = `${CRYPTO_BASE}/bars?symbols=${symEncoded}&timeframe=15Min&start=${startStr}&limit=${limit}`;
+      const r = await fetch(url, { headers: HEADERS });
+      const d = await r.json();
+      const bars = d.bars?.[sym] || [];
+      console.log(`[DATA] ${ticker} 15min bars: ${bars.length}`);
+      return bars.map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v, t:b.t }));
+    } else {
+      const url = `${DATA_BASE}/stocks/bars?symbols=${sym}&timeframe=15Min&start=${startStr}&limit=${limit}&feed=iex&adjustment=raw`;
+      const r = await fetch(url, { headers: HEADERS });
+      const d = await r.json();
+      const bars = d.bars?.[sym] || [];
+      console.log(`[DATA] ${ticker} 15min bars: ${bars.length}`);
+      return bars.map(b => ({ c:b.c, o:b.o, h:b.h, l:b.l, v:b.v, t:b.t }));
+    }
+  } catch(e) {
+    console.error(`[DATA] fetch15MinBars ${ticker}:`, e.message);
+    return [];
+  }
+}
+
 async function fetchLatestPrice(ticker) {
   try {
     const sym = alpacaSym(ticker);
@@ -583,10 +613,11 @@ async function runScan() {
   console.log(`[SCAN] Starting — ${config.tickers.length} tickers`);
   for (const ticker of config.tickers) {
     try {
-      const bars   = await fetchBars(ticker, 100);
-      const signal = detectSignal(bars);
-      const price  = await fetchLatestPrice(ticker) || signal.price;
-      signal.price = price;
+      const bars       = await fetchBars(ticker, 100);
+      const hourlyBars = await fetch15MinBars(ticker, 200);
+      const signal     = detectSignal(bars);
+      const price      = await fetchLatestPrice(ticker) || signal.price;
+      signal.price     = price;
       state.signals[ticker] = signal;
       state.prices[ticker]  = price;
 
@@ -631,9 +662,12 @@ async function runScan() {
         }
       }
 
-      // Detect range for this ticker
-      const rangeInfo = detectRange(bars);
+      // Detect range using hourly bars for intraday precision
+      const rangeInfo = detectRange(hourlyBars.length >= 30 ? hourlyBars : bars);
       state.ranges[ticker] = rangeInfo;
+      if (rangeInfo.isRanging) {
+        console.log(`[RANGE] ${ticker} ranging $${rangeInfo.support?.toFixed(4)}–$${rangeInfo.resistance?.toFixed(4)} (${rangeInfo.rangeSize ? (rangeInfo.rangeSize*100).toFixed(1) : '?'}% range, ${rangeInfo.supportTouches} support / ${rangeInfo.resistanceTouches} resistance touches)`);
+      }
 
       // Check cooldown
       const cooldown = state.cooldowns[ticker];
