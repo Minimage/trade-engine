@@ -319,37 +319,39 @@ function isLowerLows(closes, lb = 10) {
 }
 
 // ── Range detection ──────────────────────────────────────────────
-function detectRange(bars, lookback = 30) {
+function detectRange(bars, lookback = 20) {
+  // Use last 20 bars (5 hours at 15min) — detect CURRENT ranges, not historical
   if (bars.length < lookback) return { isRanging: false };
   const slice = bars.slice(-lookback);
-  const closes = slice.map(b => b.c);
-  const highs  = slice.map(b => b.h);
-  const lows   = slice.map(b => b.l);
+  const highs = slice.map(b => b.h);
+  const lows  = slice.map(b => b.l);
 
-  // Find support (average of bottom 25% of lows) and resistance (average of top 25% of highs)
+  // Find support zone (average of bottom 25% lows) and resistance zone (average of top 25% highs)
   const sortedLows  = [...lows].sort((a,b) => a-b);
   const sortedHighs = [...highs].sort((a,b) => b-a);
-  const quarter = Math.floor(lookback / 4);
+  const quarter  = Math.max(2, Math.floor(lookback / 4));
   const support    = sortedLows.slice(0, quarter).reduce((a,b) => a+b, 0) / quarter;
   const resistance = sortedHighs.slice(0, quarter).reduce((a,b) => a+b, 0) / quarter;
   const rangeSize  = (resistance - support) / support;
 
-  // Check if price has been bouncing — multiple touches of support and resistance
-  let supportTouches    = 0;
-  let resistanceTouches = 0;
-  const supportZone    = support * 1.02;    // within 2% of support
-  const resistanceZone = resistance * 0.98; // within 2% of resistance
-
+  // Count touches — price within 2% of each level counts as a touch
+  let supportTouches = 0, resistanceTouches = 0;
+  const supportZone    = support * 1.02;
+  const resistanceZone = resistance * 0.98;
   for (const bar of slice) {
     if (bar.l <= supportZone)    supportTouches++;
     if (bar.h >= resistanceZone) resistanceTouches++;
   }
 
-  // It's ranging if:
-  // - Range is between 3% and 20% (not too tight, not trending strongly)
-  // - At least 3 touches of both support and resistance
-  const isRanging = rangeSize >= 0.03 && rangeSize <= 0.20
-    && supportTouches >= 3 && resistanceTouches >= 3;
+  // Range criteria:
+  // 1. Range size between 1% and 8% max — not too tight (noise) not too wide (trend)
+  // 2. At least 2 touches of both support AND resistance
+  // 3. Price must currently be inside the range (not broken out)
+  const currentPrice  = slice[slice.length - 1].c;
+  const insideRange   = currentPrice >= support * 0.99 && currentPrice <= resistance * 1.01;
+  const isRanging     = rangeSize >= 0.01 && rangeSize <= 0.08
+    && supportTouches >= 2 && resistanceTouches >= 2
+    && insideRange;
 
   return { isRanging, support, resistance, rangeSize, supportTouches, resistanceTouches };
 }
@@ -699,7 +701,7 @@ async function runScan() {
       }
 
       // Detect range using hourly bars for intraday precision
-      const rangeInfo = detectRange(hourlyBars.length >= 30 ? hourlyBars : bars);
+      const rangeInfo = detectRange(hourlyBars.length >= 20 ? hourlyBars : bars);
       state.ranges[ticker] = rangeInfo;
       if (rangeInfo.isRanging) {
         console.log(`[RANGE] ${ticker} ranging $${rangeInfo.support?.toFixed(4)}–$${rangeInfo.resistance?.toFixed(4)} (${rangeInfo.rangeSize ? (rangeInfo.rangeSize*100).toFixed(1) : '?'}% range, ${rangeInfo.supportTouches} support / ${rangeInfo.resistanceTouches} resistance touches)`);
