@@ -85,7 +85,7 @@ let config = {
   rsiOverbought:   62,
   profitTargetPct: 1.5,
   stopLossPct:     3.0,
-  scanIntervalSec: 120,
+  scanIntervalSec: 60,
   paperMode:       false,
 };
 
@@ -388,78 +388,114 @@ function detectSignal(bars) {
   const closes = bars.map(b => b.c);
   const vols   = bars.map(b => b.v);
   const price  = closes[closes.length - 1];
-  let buyVotes = 0, sellVotes = 0, total = 0;
+  let votes = 0, total = 0;
   const reasons = [];
 
-  // RSI
-  const rsi = computeRSI(closes);
-  if (rsi !== null) {
-    total += 2;
-    if (rsi < config.rsiOversold)        { buyVotes  += 2; reasons.push(`RSI oversold (${rsi.toFixed(1)})`); }
-    else if (rsi > config.rsiOverbought) { sellVotes += 2; reasons.push(`RSI overbought (${rsi.toFixed(1)})`); }
-  }
-
-  // MACD
-  const { macd, signal, macdPrev, signalPrev } = computeMACD(closes);
-  if (macd != null) {
-    total += 2;
-    if (macdPrev < signalPrev && macd > signal)      { buyVotes  += 2; reasons.push('MACD bullish crossover'); }
-    else if (macdPrev > signalPrev && macd < signal) { sellVotes += 2; reasons.push('MACD bearish crossover'); }
-  }
-
-  // Bollinger Bands
-  const { upper, lower } = computeBollinger(closes);
-  if (upper != null) {
-    total += 2;
-    if (price <= lower)      { buyVotes  += 2; reasons.push('Price at lower Bollinger Band'); }
-    else if (price >= upper) { sellVotes += 2; reasons.push('Price at upper Bollinger Band'); }
-  }
-
-  // EMA trend
+  // ── Step 1: Determine primary trend using EMA ─────────────────
   const ema20 = computeEMA(closes, 20);
   const ema50 = computeEMA(closes, 50);
-  if (ema20 && ema50) {
-    total += 1;
-    if (ema20 > ema50) { buyVotes  += 1; reasons.push('EMA20 above EMA50 (uptrend)'); }
-    else               { sellVotes += 1; reasons.push('EMA20 below EMA50 (downtrend)'); }
+  const isUptrend = ema20 && ema50 && ema20 > ema50;
+  const trendLabel = isUptrend ? 'UPTREND' : 'DOWNTREND';
+
+  // ── Step 2: Only count confirming indicators ──────────────────
+  // In uptrend: positive votes = bullish signals (we want to BUY)
+  // In downtrend: positive votes = bearish signals (we want to SELL)
+  // votes > 0 means "go with the trend", votes < 0 means "counter-trend noise, ignore"
+
+  // RSI — oversold in uptrend = buy opportunity, overbought in downtrend = sell opportunity
+  const rsi = computeRSI(closes);
+  if (rsi !== null) {
+    if (isUptrend && rsi < config.rsiOversold) {
+      total += 2; votes += 2;
+      reasons.push(`RSI oversold (${rsi.toFixed(1)}) — uptrend dip buy`);
+    } else if (!isUptrend && rsi > config.rsiOverbought) {
+      total += 2; votes += 2;
+      reasons.push(`RSI overbought (${rsi.toFixed(1)}) — downtrend sell`);
+    } else {
+      total += 1; // neutral RSI still counts as a data point
+    }
   }
 
-  // Volume spike
+  // MACD — only count crossovers that align with trend
+  const { macd, signal, macdPrev, signalPrev } = computeMACD(closes);
+  if (macd != null) {
+    if (isUptrend && macdPrev < signalPrev && macd > signal) {
+      total += 2; votes += 2;
+      reasons.push('MACD bullish crossover confirms uptrend');
+    } else if (!isUptrend && macdPrev > signalPrev && macd < signal) {
+      total += 2; votes += 2;
+      reasons.push('MACD bearish crossover confirms downtrend');
+    } else {
+      total += 1;
+    }
+  }
+
+  // Bollinger Bands — lower band in uptrend = buy, upper band in downtrend = sell
+  const { upper, lower } = computeBollinger(closes);
+  if (upper != null) {
+    if (isUptrend && price <= lower) {
+      total += 2; votes += 2;
+      reasons.push('Price at lower Bollinger — uptrend support');
+    } else if (!isUptrend && price >= upper) {
+      total += 2; votes += 2;
+      reasons.push('Price at upper Bollinger — downtrend resistance');
+    } else {
+      total += 1;
+    }
+  }
+
+  // EMA strength — how far apart are the EMAs? Wider gap = stronger trend
+  if (ema20 && ema50) {
+    total += 1; votes += 1; // always adds to confidence when trend is clear
+    reasons.push(`EMA20 ${isUptrend ? 'above' : 'below'} EMA50 (${trendLabel.toLowerCase()})`);
+  }
+
+  // Volume spike — confirms trend direction
   const avgVol  = vols.slice(-20).reduce((a,b) => a+b, 0) / 20;
   const currVol = vols[vols.length - 1];
   if (avgVol > 0 && currVol > avgVol * 1.5) {
-    total += 1;
-    if (buyVotes > sellVotes) { buyVotes  += 1; reasons.push('Volume spike confirms bullish'); }
-    else                      { sellVotes += 1; reasons.push('Volume spike confirms bearish'); }
+    total += 1; votes += 1;
+    reasons.push(`Volume spike confirms ${trendLabel.toLowerCase()}`);
   }
 
-  // Candlestick patterns
-  if (isBullishEngulfing(bars))             { total += 2; buyVotes  += 2; reasons.push('Bullish engulfing candle'); }
-  if (isBearishEngulfing(bars))             { total += 2; sellVotes += 2; reasons.push('Bearish engulfing candle'); }
-  if (isHammer(bars[bars.length - 1]))      { total += 1; buyVotes  += 1; reasons.push('Hammer candle (reversal)'); }
-  if (isShootingStar(bars[bars.length-1]))  { total += 1; sellVotes += 1; reasons.push('Shooting star (reversal)'); }
-  if (isDoji(bars[bars.length - 1])) {
-    if (buyVotes > sellVotes)        { total += 1; buyVotes  += 1; reasons.push('Doji confirms bullish bias'); }
-    else if (sellVotes > buyVotes)   { total += 1; sellVotes += 1; reasons.push('Doji confirms bearish bias'); }
+  // Candlestick patterns — only count ones matching the trend
+  if (isUptrend) {
+    if (isBullishEngulfing(bars))        { total += 2; votes += 2; reasons.push('Bullish engulfing — uptrend continuation'); }
+    if (isHammer(bars[bars.length - 1])) { total += 1; votes += 1; reasons.push('Hammer — uptrend reversal from dip'); }
+    if (isDoubleBottom(closes))          { total += 3; votes += 3; reasons.push('Double bottom — uptrend confirmed'); }
+    if (isBullishBreakout(closes))       { total += 2; votes += 2; reasons.push('Bullish breakout above resistance'); }
+    if (isHigherHighs(closes))           { total += 1; votes += 1; reasons.push('Higher highs — uptrend strengthening'); }
+    if (isDoji(bars[bars.length - 1]))   { total += 1; votes += 1; reasons.push('Doji — pause before uptrend continues'); }
+  } else {
+    if (isBearishEngulfing(bars))             { total += 2; votes += 2; reasons.push('Bearish engulfing — downtrend continuation'); }
+    if (isShootingStar(bars[bars.length - 1])){ total += 1; votes += 1; reasons.push('Shooting star — downtrend reversal from peak'); }
+    if (isDoubleTop(closes))                  { total += 3; votes += 3; reasons.push('Double top — downtrend confirmed'); }
+    if (isBearishBreakdown(closes))           { total += 2; votes += 2; reasons.push('Bearish breakdown below support'); }
+    if (isLowerLows(closes))                  { total += 1; votes += 1; reasons.push('Lower lows — downtrend strengthening'); }
+    if (isDoji(bars[bars.length - 1]))        { total += 1; votes += 1; reasons.push('Doji — pause before downtrend continues'); }
   }
-
-  // Chart patterns
-  if (isDoubleBottom(closes))    { total += 3; buyVotes  += 3; reasons.push('Double bottom pattern'); }
-  if (isDoubleTop(closes))       { total += 3; sellVotes += 3; reasons.push('Double top pattern'); }
-  if (isBullishBreakout(closes)) { total += 2; buyVotes  += 2; reasons.push('Bullish breakout above resistance'); }
-  if (isBearishBreakdown(closes)){ total += 2; sellVotes += 2; reasons.push('Bearish breakdown below support'); }
-  if (isHigherHighs(closes))     { total += 1; buyVotes  += 1; reasons.push('Higher highs trend'); }
-  if (isLowerLows(closes))       { total += 1; sellVotes += 1; reasons.push('Lower lows trend'); }
 
   if (total === 0) return { action:'hold', confidence:0, reasons:['No data'], rsi, price };
 
-  const confidence = Math.max(buyVotes, sellVotes) / total;
+  const confidence = votes / total;
   let action = 'hold';
-  if (buyVotes > sellVotes && confidence >= config.minConfidence) action = 'buy';
-  else if (sellVotes > buyVotes && confidence >= config.minConfidence) action = 'sell';
 
-  console.log(`[SIGNAL] ${action.padEnd(4)} conf=${(confidence*100).toFixed(0)}% buy=${buyVotes} sell=${sellVotes}/${total} | ${reasons.slice(0,2).join(', ')}`);
-  return { action, confidence: Math.round(confidence*100)/100, reasons: reasons.length ? reasons : ['No strong signal'], rsi: rsi ? Math.round(rsi*10)/10 : null, price, buyVotes, sellVotes, total };
+  // In uptrend — high confidence = BUY
+  // In downtrend — high confidence = SELL
+  if (confidence >= config.minConfidence) {
+    action = isUptrend ? 'buy' : 'sell';
+  }
+
+  console.log(`[SIGNAL] ${trendLabel} ${action.padEnd(4)} conf=${(confidence*100).toFixed(0)}% votes=${votes}/${total} | ${reasons.slice(0,2).join(', ')}`);
+  return {
+    action,
+    confidence: Math.round(confidence * 100) / 100,
+    reasons: reasons.length ? reasons : ['No strong signal'],
+    rsi: rsi ? Math.round(rsi * 10) / 10 : null,
+    price,
+    trend: trendLabel,
+    votes, total
+  };
 }
 
 // ── Account & position sync ───────────────────────────────────────
