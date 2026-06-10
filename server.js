@@ -349,7 +349,7 @@ function detectRange(bars, lookback = 20) {
   // 3. Price must currently be inside the range (not broken out)
   const currentPrice  = slice[slice.length - 1].c;
   const insideRange   = currentPrice >= support * 0.99 && currentPrice <= resistance * 1.01;
-  const isRanging     = rangeSize >= 0.01 && rangeSize <= 0.08
+  const isRanging     = rangeSize >= 0.02 && rangeSize <= 0.08
     && supportTouches >= 2 && resistanceTouches >= 2
     && insideRange;
 
