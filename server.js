@@ -12,7 +12,6 @@ app.use(express.json());
 // Serve built React frontend in production
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { existsSync } from 'fs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const distPath = join(__dirname, 'dist');
 if (existsSync(distPath)) {
