@@ -299,7 +299,7 @@ export default function App() {
         if (sig && typeof sig === 'object') setSignals(sig);
         if (pos) setPositions(pos);
         if (t)   setTrades(t);
-        if (c)   { setConfig(c); setEditConfig(prev => isEditingConfig.current ? prev : c); }
+        if (c)   setConfig(c);  // never touch editConfig during polling
         if (cd)  setCooldowns(cd);
         if (rng) setRanges(rng);
       } catch(e) { console.error('Poll error:', e); }
@@ -441,7 +441,14 @@ export default function App() {
       {/* Tabs */}
       <div style={{ display: "flex", borderBottom: `1px solid ${C.border}`, marginBottom: 18 }}>
         {tabs.map(t => (
-          <button key={t} onClick={() => setTab(t)} style={{
+          <button key={t} onClick={() => {
+            setTab(t);
+            // When opening settings, sync editConfig from latest server config
+            if (t === 'settings') {
+              isEditingConfig.current = false;
+              setEditConfig(config || {});
+            }
+          }} style={{
             background: "none", border: "none", padding: "7px 14px", fontSize: 9,
             cursor: "pointer", letterSpacing: "0.12em", fontWeight: 800,
             textTransform: "uppercase", fontFamily: "inherit",
