@@ -647,10 +647,17 @@ export default function App() {
             <SectionLabel>Tickers</SectionLabel>
             <div style={{ padding: 14 }}>
               <input
-                value={Array.isArray(editConfig.tickers) ? editConfig.tickers.join(", ") : ""}
-                onChange={e => setEditConfig(p => ({
-                  ...p, tickers: e.target.value.split(",").map(t => t.trim().toUpperCase()).filter(Boolean)
-                }))}
+                value={editConfig._tickersRaw !== undefined ? editConfig._tickersRaw : (Array.isArray(editConfig.tickers) ? editConfig.tickers.join(", ") : "")}
+                onChange={e => {
+                  isEditingConfig.current = true;
+                  // Store raw string while typing so user can edit freely
+                  setEditConfig(p => ({ ...p, _tickersRaw: e.target.value }));
+                }}
+                onBlur={e => {
+                  // Only parse into array when user leaves the field
+                  const parsed = e.target.value.split(",").map(t => t.trim().toUpperCase()).filter(Boolean);
+                  setEditConfig(p => ({ ...p, tickers: parsed, _tickersRaw: undefined }));
+                }}
                 placeholder="AAPL, MSFT, BTC-USD, ETH-USD"
                 style={inp} />
               <p style={{ fontSize: 9, color: C.textMuted, margin: "6px 0 0" }}>
