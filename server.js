@@ -179,7 +179,7 @@ async function fetch15MinBars(ticker, limit = 200) {
   try {
     const sym = alpacaSym(ticker);
     const start = new Date();
-    start.setDate(start.getDate() - 14); // go back 14 days to ensure enough trading bars
+    start.setDate(start.getDate() - 3); // go back 3 days — range trading needs CURRENT price action
     const startStr = start.toISOString().split('T')[0];
 
     if (isCrypto(ticker)) {
@@ -375,7 +375,9 @@ function detectRange(bars, lookback = 20) {
   // 2. At least 2 touches of both support AND resistance
   // 3. Price must currently be inside the range (not broken out)
   const currentPrice  = slice[slice.length - 1].c;
-  const insideRange   = currentPrice >= support * 0.99 && currentPrice <= resistance * 1.01;
+  // Price must be within 3% of the range to be considered inside it
+  const insideRange   = currentPrice >= support * 0.97 && currentPrice <= resistance * 1.03;
+  // Range must be valid AND price must currently be inside it
   const isRanging     = rangeSize >= 0.02 && rangeSize <= 0.08
     && supportTouches >= 2 && resistanceTouches >= 2
     && insideRange;
@@ -708,8 +710,13 @@ async function runScan() {
           ? (range.resistance - pos.avg_cost) / pos.avg_cost * 100
           : config.profitTargetPct;
 
-        if (pct >= profitTarget) {
-          const reason = posIsRanging ? `range resistance hit ($${range.resistance?.toFixed(4)})` : `profit target (+${pct.toFixed(1)}%)`;
+        // Safety override: if up more than profitTargetPct, always sell even in range mode
+        const safetyOverride = pct >= config.profitTargetPct && posIsRanging;
+        if (pct >= profitTarget || safetyOverride) {
+          const reason = safetyOverride
+            ? `safety override — up ${pct.toFixed(1)}% exceeds ${config.profitTargetPct}% minimum`
+            : posIsRanging ? `range resistance hit ($${range.resistance?.toFixed(4)})`
+            : `profit target (+${pct.toFixed(1)}%)`;
           console.log(`[BOT] Selling ${ticker} — ${reason}`);
           await executeSell(ticker, price);
         } else if (pct <= -config.stopLossPct) {
