@@ -375,12 +375,16 @@ function detectRange(bars, lookback = 20) {
   // 2. At least 2 touches of both support AND resistance
   // 3. Price must currently be inside the range (not broken out)
   const currentPrice  = slice[slice.length - 1].c;
-  // Price must be within 3% of the range to be considered inside it
-  const insideRange   = currentPrice >= support * 0.97 && currentPrice <= resistance * 1.03;
+  // Price must be inside the range — not broken above resistance or below support
+  const aboveResistance = currentPrice > resistance * 1.005; // broken above resistance
+  const belowSupport    = currentPrice < support * 0.995;   // broken below support
+  const insideRange     = !aboveResistance && !belowSupport;
   // Range must be valid AND price must currently be inside it
   const isRanging     = rangeSize >= 0.02 && rangeSize <= 0.08
     && supportTouches >= 2 && resistanceTouches >= 2
     && insideRange;
+  if (aboveResistance) console.log(`[RANGE] ${' '.padEnd(10)} broke ABOVE resistance $${resistance?.toFixed(4)} — range invalidated`);
+  if (belowSupport)    console.log(`[RANGE] ${' '.padEnd(10)} broke BELOW support $${support?.toFixed(4)} — range invalidated`);
 
   return { isRanging, support, resistance, rangeSize, supportTouches, resistanceTouches };
 }
