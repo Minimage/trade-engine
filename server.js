@@ -73,6 +73,7 @@ let state = {
   startupScans: 0,
   cooldowns:  {},   // ticker -> { until: timestamp, reason: string }
   ranges:     {},   // ticker -> { support, resistance, isRanging }
+  recentSells: {},  // ticker -> timestamp — prevent duplicate sells
 };
 
 const CONFIG_FILE = './config.json';
@@ -716,24 +717,31 @@ async function runScan() {
 
         // Safety override: if up more than profitTargetPct, always sell even in range mode
         const safetyOverride = pct >= config.profitTargetPct && posIsRanging;
-        if (pct >= profitTarget || safetyOverride) {
+        // Don't sell same ticker twice within 2 minutes — prevents duplicate sell orders
+        const recentSell = state.recentSells[ticker];
+        const soldRecently = recentSell && Date.now() - recentSell < 2 * 60 * 1000;
+
+        if ((pct >= profitTarget || safetyOverride) && !soldRecently) {
           const reason = safetyOverride
             ? `safety override — up ${pct.toFixed(1)}% exceeds ${config.profitTargetPct}% minimum`
             : posIsRanging ? `range resistance hit ($${range.resistance?.toFixed(4)})`
             : `profit target (+${pct.toFixed(1)}%)`;
           console.log(`[BOT] Selling ${ticker} — ${reason}`);
+          state.recentSells[ticker] = Date.now();
           await executeSell(ticker, price);
         } else if (pct <= -config.stopLossPct) {
-          console.log(`[BOT] Selling ${ticker} — stop loss hit (${pct.toFixed(1)}%) — adding cooldown`);
-          // Add cooldown — don't re-enter for 30 minutes unless trend reverses
-          state.cooldowns[ticker] = {
-            until:  Date.now() + 30 * 60 * 1000,
-            reason: `stop loss @ $${price?.toFixed(4)}`,
-          };
-          await executeSell(ticker, price);
-        } else if (signal.action === 'sell' && !posIsRanging) {
-          // In range mode, don't sell on signal — wait for resistance
+          if (!soldRecently) {
+            console.log(`[BOT] Selling ${ticker} — stop loss hit (${pct.toFixed(1)}%) — adding cooldown`);
+            state.cooldowns[ticker] = {
+              until:  Date.now() + 30 * 60 * 1000,
+              reason: `stop loss @ $${price?.toFixed(4)}`,
+            };
+            state.recentSells[ticker] = Date.now();
+            await executeSell(ticker, price);
+          }
+        } else if (signal.action === 'sell' && !posIsRanging && !soldRecently) {
           console.log(`[BOT] Selling ${ticker} — sell signal`);
+          state.recentSells[ticker] = Date.now();
           await executeSell(ticker, price);
         }
       }
