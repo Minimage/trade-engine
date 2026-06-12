@@ -839,6 +839,46 @@ app.get('/api/account', (req, res) => {
 });
 
 app.get('/api/signals',   (req, res) => res.json(state.signals));
+
+// ── Mirror trade endpoint (receives signals from Invo bot) ────────
+app.post('/api/mirror-trade', async (req, res) => {
+  const { ticker, action, source } = req.body;
+  if (!ticker || !action) return res.status(400).json({ error: 'ticker and action required' });
+
+  const price = state.prices[ticker] || await fetchLatestPrice(ticker);
+  if (!price) return res.status(404).json({ error: `No price found for ${ticker}` });
+
+  console.log(`[MIRROR] ${source || 'invo'} signal: ${action.toUpperCase()} ${ticker} @ ${price}`);
+
+  try {
+    if (action === 'buy') {
+      // Check budget
+      const deployed = Object.values(state.positions)
+        .reduce((s, p) => s + p.avg_cost * p.shares, 0);
+      if (deployed + config.maxPositionUsd > config.totalBudgetUsd) {
+        return res.status(400).json({ error: 'Budget cap reached' });
+      }
+      if (state.positions[ticker]) {
+        return res.status(400).json({ error: `Already have position in ${ticker}` });
+      }
+      await executeBuy(ticker, price);
+      res.json({ success: true, action: 'buy', ticker, price });
+
+    } else if (action === 'sell') {
+      if (!state.positions[ticker]) {
+        return res.status(400).json({ error: `No position in ${ticker} to sell` });
+      }
+      await executeSell(ticker, price);
+      res.json({ success: true, action: 'sell', ticker, price });
+
+    } else {
+      res.status(400).json({ error: `Unknown action: ${action}` });
+    }
+  } catch(e) {
+    console.error(`[MIRROR] Error:`, e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 app.get('/api/cooldowns', (req, res) => res.json(state.cooldowns));
 app.get('/api/ranges',    (req, res) => res.json(state.ranges));
 app.get('/api/positions', (req, res) => res.json(state.positions));
