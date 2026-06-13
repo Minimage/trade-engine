@@ -246,8 +246,6 @@ export default function App() {
   const [ranges, setRanges] = useState({});
   const [invoStatus, setInvoStatus] = useState({ running: false, users: [] });
   const [invoUserInput, setInvoUserInput] = useState('');
-  const [invoStatus, setInvoStatus] = useState({ running: false, users: [] });
-  const [invoUserInput, setInvoUserInput] = useState('');
   const [editConfig, setEditConfig] = useState({});
   const isEditingConfig = useRef(false);
   const [scanning, setScanning] = useState(false);
