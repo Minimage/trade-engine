@@ -184,7 +184,8 @@ export async function startInvoPoller(invoState) {
         const displayName  = item.displayName || item.user?.displayName || item.name || '';
         const handle       = item.handle || item.user?.handle || username;
 
-        // Log all new notifications so we can see what fields are available
+        // Log full item structure so we can see what fields are available
+        console.log(`[INVO] Notification raw:`, JSON.stringify(item, null, 2).substring(0, 500));
         console.log(`[INVO] Notification: type=${type} username="${username}" display="${displayName}" handle="${handle}"`);
 
         // Match against any of the available name fields
