@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import fetch from 'node-fetch';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { startInvoPoller, getInvoUsers, addInvoUser, removeInvoUser } from './invo_poller.js';
 
 const app  = express();
 const PORT = process.env.PORT || 3002;
@@ -879,6 +880,21 @@ app.post('/api/mirror-trade', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// ── Invo user management ──────────────────────────────────────────
+app.get('/api/invo/users',           (req, res) => res.json(getInvoUsers()));
+app.post('/api/invo/users/add',      (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.status(400).json({ error: 'username required' });
+  addInvoUser(username);
+  res.json({ success: true, users: getInvoUsers() });
+});
+app.post('/api/invo/users/remove',   (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.status(400).json({ error: 'username required' });
+  removeInvoUser(username);
+  res.json({ success: true, users: getInvoUsers() });
+});
 app.get('/api/cooldowns', (req, res) => res.json(state.cooldowns));
 app.get('/api/ranges',    (req, res) => res.json(state.ranges));
 app.get('/api/positions', (req, res) => res.json(state.positions));
@@ -968,5 +984,6 @@ app.listen(PORT, async () => {
   console.log(`[SERVER] Trade engine running on port ${PORT}`);
   await refreshAccount();
   await syncPositions();
+  startInvoPoller().catch(e => console.error('[INVO] Failed to start poller:', e.message));
   console.log(`[SERVER] Connected to Alpaca — paper mode: ${config.paperMode}`);
 });
