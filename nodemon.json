@@ -1,0 +1,12 @@
+{
+  "watch": ["server.js", "invo_poller.js"],
+  "ext": "js,mjs,cjs,json",
+  "ignore": [
+    "invo_seen.json",
+    "invo_tokens.json",
+    "config.json",
+    "src/*",
+    "dist/*",
+    "node_modules/*"
+  ]
+}
