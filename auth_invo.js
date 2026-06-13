@@ -64,8 +64,8 @@ async function main() {
   // Build payload with required device fields
   const loginPayload = {
     email:      EMAIL,
-    otp:        otp.trim(),
-    deviceId:   'replit-trade-bot-001',
+    code:       otp.trim(),  // API uses "code" not "otp"
+    deviceId:   'a1b2c3d4-e5f6-7890-abcd-ef1234567890',  // must be valid UUID
     deviceType: 'web',
     deviceInfo: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
   };
