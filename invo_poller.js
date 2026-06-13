@@ -277,6 +277,8 @@ export async function startInvoPoller() {
     } catch(e) {
       console.error('[INVO] Poll error:', e.message);
     }
+
+    console.log(`[INVO] ⏱ Next poll in ${POLL_INTERVAL/1000}s — watching ${targetUsers.join(', ')}`);
   };
 
   // Run immediately then on interval
