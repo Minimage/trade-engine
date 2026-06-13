@@ -13,13 +13,15 @@
  */
 
 import fetch from 'node-fetch';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import {
+  getInvoUsers, addInvoUser as dbAddUser, removeInvoUser as dbRemoveUser,
+  getTokens, saveTokens as dbSaveTokens,
+  isNotificationSeen, markNotificationSeen, pruneSeenNotifications
+} from './database.js';
 
 // ── Config ────────────────────────────────────────────────────────
 const API_BASE      = 'https://api.involio.com/v1_0';
 const POLL_INTERVAL = 60 * 1000; // 60 seconds
-const TOKEN_FILE    = './invo_tokens.json';
-const SEEN_FILE     = './invo_seen.json';
 
 // Users to follow — loaded from tokens file, editable at runtime
 const DEFAULT_USERS = ['crypto_rocket'];
@@ -37,52 +39,7 @@ function mapTicker(ticker) {
   return ticker.toUpperCase(); // stocks stay as-is
 }
 
-// ── Token management ──────────────────────────────────────────────
-function loadTokens() {
-  // First check Replit secrets (production)
-  if (process.env.INVO_ACCESS_TOKEN) {
-    return {
-      accessToken:  process.env.INVO_ACCESS_TOKEN,
-      refreshToken: process.env.INVO_REFRESH_TOKEN,
-      targetUsers:  DEFAULT_USERS,
-    };
-  }
-  // Fall back to local file (development)
-  if (existsSync(TOKEN_FILE)) {
-    try {
-      return JSON.parse(readFileSync(TOKEN_FILE, 'utf8'));
-    } catch(e) {
-      console.error('[INVO] Failed to load tokens:', e.message);
-    }
-  }
-  return null;
-}
-
-function saveTokens(tokens) {
-  try {
-    writeFileSync(TOKEN_FILE, JSON.stringify(tokens, null, 2));
-  } catch(e) {
-    console.error('[INVO] Failed to save tokens:', e.message);
-  }
-}
-
-// ── Seen notifications persistence ───────────────────────────────
-function loadSeen() {
-  if (existsSync(SEEN_FILE)) {
-    try {
-      return new Set(JSON.parse(readFileSync(SEEN_FILE, 'utf8')));
-    } catch(e) {}
-  }
-  return new Set();
-}
-
-function saveSeen(seen) {
-  try {
-    // Only keep last 1000 to prevent bloat
-    const arr = [...seen].slice(-1000);
-    writeFileSync(SEEN_FILE, JSON.stringify(arr));
-  } catch(e) {}
-}
+// ── Token/seen management now handled by database.js ─────────────
 
 // ── API helpers ───────────────────────────────────────────────────
 async function invoPost(endpoint, body, accessToken) {
@@ -108,6 +65,7 @@ async function refreshAccessToken(refreshToken) {
     const data = await res.json();
     if (data.accessToken) {
       console.log('[INVO] Token refreshed successfully');
+      dbSaveTokens(data.accessToken, data.refreshToken || refreshToken);
       return data.accessToken;
     }
   } catch(e) {
@@ -161,7 +119,7 @@ async function mirrorTrade(action, ticker) {
 export async function startInvoPoller(invoState) {
   console.log('[INVO] Starting Invo copy trading poller...');
 
-  let tokens = loadTokens();
+  let tokens = getTokens();
   if (!tokens?.accessToken) {
     console.log('[INVO] ⚠️  No tokens found — run auth_invo.js first to authenticate');
     console.log('[INVO] Poller will not start until tokens are configured');
@@ -169,10 +127,9 @@ export async function startInvoPoller(invoState) {
     return;
   }
 
-  const seen    = loadSeen();
   let isFirstRun = true;
-
-  console.log(`[INVO] Following: ${tokens.targetUsers?.join(', ') || DEFAULT_USERS.join(', ')}`);
+  const users = getInvoUsers();
+  console.log(`[INVO] Following: ${users.join(', ')}`);
   console.log(`[INVO] Polling every ${POLL_INTERVAL / 1000}s`);
 
   const poll = async () => {
@@ -206,20 +163,19 @@ export async function startInvoPoller(invoState) {
       // On first run, mark all existing as seen without acting on them
       if (isFirstRun) {
         for (const item of items) {
-          if (item.id) seen.add(item.id);
+          if (item.id) markNotificationSeen(item.id);
         }
-        saveSeen(seen);
         isFirstRun = false;
         console.log(`[INVO] Marked ${items.length} existing notifications as seen`);
         return;
       }
 
-      const targetUsers = tokens.targetUsers || DEFAULT_USERS;
+      const targetUsers = getInvoUsers();
 
       for (const item of items) {
         // Skip already seen
-        if (!item.id || seen.has(item.id)) continue;
-        seen.add(item.id);
+        if (!item.id || isNotificationSeen(item.id)) continue;
+        markNotificationSeen(item.id);
 
         const type     = item.type || '';
 
@@ -293,13 +249,13 @@ export async function startInvoPoller(invoState) {
         }
       }
 
-      saveSeen(seen);
+      pruneSeenNotifications();
 
     } catch(e) {
       console.error('[INVO] Poll error:', e.message);
     }
 
-    console.log(`[INVO] ⏱ Next poll in ${POLL_INTERVAL/1000}s — watching ${(tokens.targetUsers || DEFAULT_USERS).join(', ')}`);
+    console.log(`[INVO] ⏱ Next poll in ${POLL_INTERVAL/1000}s — watching ${getInvoUsers().join(', ')}`);
   };
 
   // Run immediately then on interval
@@ -316,28 +272,5 @@ export async function startInvoPoller(invoState) {
 }
 
 // ── Target user management (callable from server.js API) ──────────
-export function getInvoUsers() {
-  const tokens = loadTokens();
-  return tokens?.targetUsers || DEFAULT_USERS;
-}
-
-export function addInvoUser(username) {
-  const tokens = loadTokens();
-  if (!tokens) return false;
-  const clean = username.replace('@', '').toLowerCase();
-  if (!tokens.targetUsers) tokens.targetUsers = [...DEFAULT_USERS];
-  if (!tokens.targetUsers.includes(clean)) {
-    tokens.targetUsers.push(clean);
-    saveTokens(tokens);
-  }
-  return true;
-}
-
-export function removeInvoUser(username) {
-  const tokens = loadTokens();
-  if (!tokens) return false;
-  const clean = username.replace('@', '').toLowerCase();
-  tokens.targetUsers = (tokens.targetUsers || DEFAULT_USERS).filter(u => u !== clean);
-  saveTokens(tokens);
-  return true;
-}
+// Re-export database functions for server.js compatibility
+export { getInvoUsers, dbAddUser as addInvoUser, dbRemoveUser as removeInvoUser };
