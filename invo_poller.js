@@ -215,19 +215,21 @@ export async function startInvoPoller(invoState) {
 
         console.log(`[INVO] Notification: type="${type}" content="${contentStr}" postId="${item.postId}"`);
 
-        // Match username from content against tracked users
-        const isTracked = targetUsers.some(u => {
-          const uLower = u.toLowerCase().replace('@','');
-          return usernameFromContent.toLowerCase() === uLower
+        const username = usernameFromContent;
+
+        // Empty list = ALL USERS mode (default)
+        // Non-empty list = only trade listed users
+        const allUsersMode = targetUsers.length === 0;
+        const isTracked = allUsersMode || targetUsers.some(u => {
+          const uLower = u.toLowerCase().replace('@', '');
+          return username.toLowerCase() === uLower
             || contentStr.toLowerCase().includes(uLower);
         });
 
         if (!isTracked) {
-          console.log(`[INVO] Not tracked — skipping`);
+          console.log(`[INVO] Not in whitelist - skipping (${username})`);
           continue;
         }
-
-        const username = usernameFromContent;
 
         console.log(`[INVO] 🔔 New: ${type} from ${username}`);
 
