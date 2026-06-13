@@ -177,30 +177,28 @@ export async function startInvoPoller(invoState) {
         if (!item.id || isNotificationSeen(item.id)) continue;
         markNotificationSeen(item.id);
 
-        const type     = item.type || '';
+        // notificationType is the action field
+        const type = item.notificationType || item.type || '';
 
-        // Extract username — try multiple fields, log what we find
-        const username     = item.username || item.user?.username || '';
-        const displayName  = item.displayName || item.user?.displayName || item.name || '';
-        const handle       = item.handle || item.user?.handle || username;
+        // Username is embedded in the content string e.g. "vortex_legion added a new investment"
+        const contentStr = item.content || '';
+        const usernameFromContent = contentStr.split(' ')[0] || '';
 
-        // Log full item structure so we can see what fields are available
-        console.log(`[INVO] Notification raw:`, JSON.stringify(item, null, 2).substring(0, 500));
-        console.log(`[INVO] Notification: type=${type} username="${username}" display="${displayName}" handle="${handle}"`);
+        console.log(`[INVO] Notification: type="${type}" content="${contentStr}" postId="${item.postId}"`);
 
-        // Match against any of the available name fields
+        // Match username from content against tracked users
         const isTracked = targetUsers.some(u => {
           const uLower = u.toLowerCase().replace('@','');
-          return username.toLowerCase().includes(uLower)
-            || displayName.toLowerCase().includes(uLower)
-            || handle.toLowerCase().includes(uLower)
-            || uLower.includes(username.toLowerCase())
-            || uLower.includes(handle.toLowerCase());
+          return usernameFromContent.toLowerCase() === uLower
+            || contentStr.toLowerCase().includes(uLower);
         });
+
         if (!isTracked) {
-          console.log(`[INVO] Not tracked — skipping (watching: ${targetUsers.join(', ')})`);
+          console.log(`[INVO] Not tracked — skipping`);
           continue;
         }
+
+        const username = usernameFromContent;
 
         console.log(`[INVO] 🔔 New: ${type} from ${username}`);
 
