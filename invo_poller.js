@@ -148,7 +148,9 @@ async function mirrorTrade(action, ticker) {
 export async function startInvoPoller(invoState) {
   console.log('[INVO] Starting Invo copy trading poller...');
 
-  let tokens = getTokens();
+  let tokens = await getTokens();
+  console.log('[INVO] Token check — INVO_ACCESS_TOKEN env:', process.env.INVO_ACCESS_TOKEN ? 'SET' : 'NOT SET');
+  console.log('[INVO] Token check — tokens from db:', tokens ? 'FOUND' : 'NOT FOUND');
   if (!tokens?.accessToken) {
     console.log('[INVO] ⚠️  No tokens found — run auth_invo.js first to authenticate');
     console.log('[INVO] Poller will not start until tokens are configured');
