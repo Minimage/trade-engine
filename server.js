@@ -973,7 +973,7 @@ app.get('/api/positions', (req, res) => res.json(state.positions));
 app.get('/api/trades',    (req, res) => res.json(state.trades.slice(0, 50)));
 app.get('/api/config',    (req, res) => res.json(config));
 
-app.post('/api/config', (req, res) => {
+app.post('/api/config', async (req, res) => {
   const allowed = ['tickers','maxPositionUsd','totalBudgetUsd','minConfidence',
     'rsiOversold','rsiOverbought','profitTargetPct','stopLossPct','scanIntervalSec','paperMode'];
   for (const key of allowed) {
