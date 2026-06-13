@@ -63,6 +63,11 @@ const alpacaSym    = t => isCrypto(t) ? (CRYPTO_MAP[t] || t.replace('-','/')) : 
 const displayName  = t => isCrypto(t) ? t.replace('-USD','') : t;
 
 // ── Bot state ─────────────────────────────────────────────────────
+let invoState = {
+  running: false,
+  intervalId: null,
+};
+
 let state = {
   botRunning: false,
   lastScan:   null,
@@ -881,15 +886,40 @@ app.post('/api/mirror-trade', async (req, res) => {
   }
 });
 
-// ── Invo user management ──────────────────────────────────────────
-app.get('/api/invo/users',           (req, res) => res.json(getInvoUsers()));
-app.post('/api/invo/users/add',      (req, res) => {
+// ── Invo controls ────────────────────────────────────────────────
+app.get('/api/invo/status', (req, res) => {
+  res.json({ running: invoState.running, users: getInvoUsers() });
+});
+
+app.post('/api/invo/start', async (req, res) => {
+  if (invoState.running) return res.json({ success: true, message: 'Already running' });
+  invoState.running = true;
+  console.log('[INVO] Poller started via API');
+  startInvoPoller(invoState).catch(e => console.error('[INVO] Poller error:', e.message));
+  res.json({ success: true, message: 'Invo poller started' });
+});
+
+app.post('/api/invo/stop', (req, res) => {
+  if (!invoState.running) return res.json({ success: true, message: 'Already stopped' });
+  invoState.running = false;
+  if (invoState.intervalId) {
+    clearInterval(invoState.intervalId);
+    invoState.intervalId = null;
+  }
+  console.log('[INVO] Poller stopped via API');
+  res.json({ success: true, message: 'Invo poller stopped' });
+});
+
+app.get('/api/invo/users', (req, res) => res.json(getInvoUsers()));
+
+app.post('/api/invo/users/add', (req, res) => {
   const { username } = req.body;
   if (!username) return res.status(400).json({ error: 'username required' });
   addInvoUser(username);
   res.json({ success: true, users: getInvoUsers() });
 });
-app.post('/api/invo/users/remove',   (req, res) => {
+
+app.post('/api/invo/users/remove', (req, res) => {
   const { username } = req.body;
   if (!username) return res.status(400).json({ error: 'username required' });
   removeInvoUser(username);
@@ -984,7 +1014,8 @@ const server = app.listen(PORT, async () => {
   console.log(`[SERVER] Trade engine running on port ${PORT}`);
   await refreshAccount();
   await syncPositions();
-  startInvoPoller().catch(e => console.error('[INVO] Failed to start poller:', e.message));
+  // Invo poller is controlled via API — don't auto-start
+  console.log('[INVO] Poller ready — use /api/invo/start to begin');
   console.log(`[SERVER] Connected to Alpaca — paper mode: ${config.paperMode}`);
 });
 

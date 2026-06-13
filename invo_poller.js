@@ -158,13 +158,14 @@ async function mirrorTrade(action, ticker) {
 }
 
 // ── Main poller ───────────────────────────────────────────────────
-export async function startInvoPoller() {
+export async function startInvoPoller(invoState) {
   console.log('[INVO] Starting Invo copy trading poller...');
 
   let tokens = loadTokens();
   if (!tokens?.accessToken) {
     console.log('[INVO] ⚠️  No tokens found — run auth_invo.js first to authenticate');
     console.log('[INVO] Poller will not start until tokens are configured');
+    if (invoState) invoState.running = false;
     return;
   }
 
@@ -175,6 +176,11 @@ export async function startInvoPoller() {
   console.log(`[INVO] Polling every ${POLL_INTERVAL / 1000}s`);
 
   const poll = async () => {
+    // Check if stopped
+    if (invoState && !invoState.running) {
+      console.log('[INVO] Poller stopped');
+      return;
+    }
     try {
       let { items, expired } = await getNotifications(tokens.accessToken);
 
@@ -283,7 +289,15 @@ export async function startInvoPoller() {
 
   // Run immediately then on interval
   await poll();
-  setInterval(poll, POLL_INTERVAL);
+  const id = setInterval(async () => {
+    if (invoState && !invoState.running) {
+      clearInterval(id);
+      console.log('[INVO] Poller stopped');
+      return;
+    }
+    await poll();
+  }, POLL_INTERVAL);
+  if (invoState) invoState.intervalId = id;
 }
 
 // ── Target user management (callable from server.js API) ──────────

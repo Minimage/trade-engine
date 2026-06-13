@@ -244,6 +244,10 @@ export default function App() {
   const [config, setConfig] = useState(null);
   const [cooldowns, setCooldowns] = useState({});
   const [ranges, setRanges] = useState({});
+  const [invoStatus, setInvoStatus] = useState({ running: false, users: [] });
+  const [invoUserInput, setInvoUserInput] = useState('');
+  const [invoStatus, setInvoStatus] = useState({ running: false, users: [] });
+  const [invoUserInput, setInvoUserInput] = useState('');
   const [editConfig, setEditConfig] = useState({});
   const isEditingConfig = useRef(false);
   const [scanning, setScanning] = useState(false);
@@ -262,7 +266,7 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [s, acc, sig, pos, t, c, cd, rng] = await Promise.all([
+      const [s, acc, sig, pos, t, c, cd, rng, inv] = await Promise.all([
         fetcher(`${API}/status`).catch(() => null),
         fetcher(`${API}/account`).catch(() => null),
         fetcher(`${API}/signals`).catch(() => null),
@@ -284,7 +288,7 @@ export default function App() {
     // Use direct fetch in interval to avoid stale closure issues
     const id = setInterval(async () => {
       try {
-        const [s, acc, sig, pos, t, c, cd, rng] = await Promise.all([
+        const [s, acc, sig, pos, t, c, cd, rng, inv] = await Promise.all([
           fetch('/api/status').then(r => r.json()).catch(() => null),
           fetch('/api/account').then(r => r.json()).catch(() => null),
           fetch('/api/signals').then(r => r.json()).catch(() => null),
@@ -293,6 +297,8 @@ export default function App() {
           fetch('/api/config').then(r => r.json()).catch(() => null),
           fetch('/api/cooldowns').then(r => r.json()).catch(() => null),
           fetch('/api/ranges').then(r => r.json()).catch(() => null),
+          fetch('/api/invo/status').then(r => r.json()).catch(() => null),
+          fetch('/api/invo/status').then(r => r.json()).catch(() => null),
         ]);
         if (s)   setStatus(s);
         if (acc) setAccount(acc);
@@ -302,6 +308,8 @@ export default function App() {
         if (c)   setConfig(c);  // never touch editConfig during polling
         if (cd)  setCooldowns(cd);
         if (rng) setRanges(rng);
+        if (inv) setInvoStatus(inv);
+        if (inv) setInvoStatus(inv);
       } catch(e) { console.error('Poll error:', e); }
     }, 5000);
     return () => clearInterval(id);
@@ -333,7 +341,7 @@ export default function App() {
   const totalPnl   = Object.values(positions).reduce((s, p) => s + (p.pnl || 0), 0);
   const buySignals = Object.values(signals).filter(s => s.action === "buy").length;
   const toastColor = { success: C.green, error: C.red, info: C.blue };
-  const tabs       = ["overview","signals","positions","trades","settings"];
+  const tabs       = ["overview","signals","positions","trades","settings","invo"];
 
   const inp = {
     background: "#070C14", border: `1px solid ${C.border}`, borderRadius: 5,
@@ -595,6 +603,80 @@ export default function App() {
             : trades.map((t,i) => <TradeRow key={i} trade={t} />)
           }
         </Card>
+      )}
+
+      {/* ── INVO ── */}
+      {tab === "invo" && (
+        <div style={{ padding: 16 }}>
+          <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ color: C.green, fontFamily: "monospace", fontSize: 13, fontWeight: "bold" }}>INVO COPY TRADING</span>
+            <span style={{ color: invoStatus.running ? C.green : "#FF4444", fontFamily: "monospace", fontSize: 11 }}>
+              ● {invoStatus.running ? "RUNNING" : "STOPPED"}
+            </span>
+          </div>
+
+          <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+            <button onClick={async () => {
+              await fetch("/api/invo/start", { method: "POST" });
+            }} style={{ background: C.green, color: C.bg, border: "none", borderRadius: 4,
+              padding: "6px 16px", fontFamily: "monospace", fontSize: 11, cursor: "pointer" }}>
+              START POLLER
+            </button>
+            <button onClick={async () => {
+              await fetch("/api/invo/stop", { method: "POST" });
+            }} style={{ background: "#FF4444", color: "white", border: "none", borderRadius: 4,
+              padding: "6px 16px", fontFamily: "monospace", fontSize: 11, cursor: "pointer" }}>
+              STOP POLLER
+            </button>
+          </div>
+
+          <div style={{ marginBottom: 8, color: "#4A5568", fontFamily: "monospace", fontSize: 11 }}>TRACKED USERS</div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <input
+              value={invoUserInput}
+              onChange={e => setInvoUserInput(e.target.value)}
+              placeholder="@username"
+              style={{ background: "#1A1F2E", border: "none", borderRadius: 4,
+                padding: "6px 10px", color: C.text, fontFamily: "monospace", fontSize: 11, width: 160 }}
+            />
+            <button onClick={async () => {
+              if (!invoUserInput) return;
+              await fetch("/api/invo/users/add", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username: invoUserInput })
+              });
+              setInvoUserInput("");
+            }} style={{ background: C.green, color: C.bg, border: "none", borderRadius: 4,
+              padding: "6px 12px", fontFamily: "monospace", fontSize: 11, cursor: "pointer" }}>
+              ADD
+            </button>
+          </div>
+
+          <div style={{ background: "#0D1117", borderRadius: 6, padding: 8, marginBottom: 12 }}>
+            {(!invoStatus.users || invoStatus.users.length === 0) && (
+              <div style={{ color: "#4A5568", fontFamily: "monospace", fontSize: 11, padding: 4 }}>No users tracked</div>
+            )}
+            {invoStatus.users?.map(user => (
+              <div key={user} style={{ display: "flex", justifyContent: "space-between",
+                alignItems: "center", padding: "6px 8px", borderBottom: "1px solid #1A1F2E" }}>
+                <span style={{ color: C.green, fontFamily: "monospace", fontSize: 11 }}>@{user}</span>
+                <button onClick={async () => {
+                  await fetch("/api/invo/users/remove", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ username: user })
+                  });
+                }} style={{ background: "transparent", color: "#FF4444", border: "none",
+                  fontFamily: "monospace", fontSize: 11, cursor: "pointer" }}>REMOVE</button>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ color: "#4A5568", fontFamily: "monospace", fontSize: 10 }}>
+            Polls Invo every 60s • Only mirrors LONG trades • Skips SHORT positions
+          </div>
+        </div>
       )}
 
       {/* ── SETTINGS ── */}
