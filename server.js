@@ -980,10 +980,22 @@ app.get('*', (req, res) => {
 });
 
 // ── Start server ──────────────────────────────────────────────────
-app.listen(PORT, async () => {
+const server = const server = app.listen(PORT, async () => {
   console.log(`[SERVER] Trade engine running on port ${PORT}`);
   await refreshAccount();
   await syncPositions();
   startInvoPoller().catch(e => console.error('[INVO] Failed to start poller:', e.message));
   console.log(`[SERVER] Connected to Alpaca — paper mode: ${config.paperMode}`);
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.log(`[SERVER] Port ${PORT} in use — waiting 3s then retrying...`);
+    setTimeout(() => {
+      server.close();
+      server.listen(PORT);
+    }, 3000);
+  } else {
+    console.error('[SERVER] Unexpected error:', err);
+  }
 });
