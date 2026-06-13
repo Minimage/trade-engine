@@ -61,13 +61,13 @@ async function main() {
   console.log('\nStart response data:', JSON.stringify(startData, null, 2));
   console.log('\nSubmitting code...');
 
-  // Build payload — try common field name variations
+  // Build payload with required device fields
   const loginPayload = {
     email:      EMAIL,
     otp:        otp.trim(),
-    code:       otp.trim(),
-    token:      otp.trim(),
-    ...(requestId && { requestId, request_id: requestId }),
+    deviceId:   'replit-trade-bot-001',
+    deviceType: 'web',
+    deviceInfo: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
   };
 
   console.log('Login payload:', JSON.stringify(loginPayload, null, 2));
