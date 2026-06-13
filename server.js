@@ -551,18 +551,22 @@ async function refreshAccount() {
 }
 
 function matchTicker(alpacaSymbol) {
-  // Try exact match first (e.g. AAPL)
+  // Try exact match in watchlist (e.g. AAPL)
   if (config.tickers.includes(alpacaSymbol)) return alpacaSymbol;
   // Try CRYPTO_MAP match (e.g. BTC/USD -> BTC-USD)
   const fromMap = Object.keys(CRYPTO_MAP).find(k => CRYPTO_MAP[k] === alpacaSymbol);
   if (fromMap) return fromMap;
-  // Try ETHUSD -> ETH-USD (Alpaca sometimes returns without slash)
+  // Try ETHUSD -> ETH-USD
   const withDash = alpacaSymbol.replace(/([A-Z]+)(USD)$/, '$1-$2');
   if (config.tickers.includes(withDash)) return withDash;
   // Try ETH/USD -> ETH-USD
   const slashToDash = alpacaSymbol.replace('/', '-');
   if (config.tickers.includes(slashToDash)) return slashToDash;
-  return null;
+  // Accept ANY ticker not in watchlist - could be Invo mirror trade
+  // Stocks: return as-is, Crypto: convert ETHUSD -> ETH-USD
+  if (alpacaSymbol.includes('/')) return alpacaSymbol.replace('/', '-');
+  if (/^[A-Z]+USD$/.test(alpacaSymbol)) return alpacaSymbol.replace(/([A-Z]+)(USD)$/, '$1-$2');
+  return alpacaSymbol; // return as-is for stocks like GOOGL, JPM, AMZN
 }
 
 async function syncPositions() {
@@ -876,15 +880,10 @@ app.post('/api/mirror-trade', async (req, res) => {
       res.json({ success: true, action: 'buy', ticker, price });
 
     } else if (action === 'sell') {
-      // For sells, find position by ticker - check both exact match and variations
-      const posKey = Object.keys(state.positions).find(k =>
-        k.toLowerCase() === ticker.toLowerCase()
-      );
+      // Sync positions first to catch any recently opened positions
+      await syncPositions();
 
-      if (!posKey) {
-        return res.status(400).json({ error: `No position in ${ticker} to sell` });
-      }
-
+      // Just try to sell - Alpaca will reject if no position exists
       const price = state.prices[ticker] || await fetchLatestPrice(ticker);
       if (!price) return res.status(404).json({ error: `Could not fetch price for ${ticker}` });
 
