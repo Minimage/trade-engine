@@ -28,15 +28,26 @@ const DEFAULT_USERS = ['crypto_rocket'];
 
 // Map Invo tickers to Alpaca format
 function mapTicker(ticker) {
-  const cryptoTickers = new Set([
-    'BTC','ETH','SOL','XRP','DOGE','AVAX','LINK','LTC',
-    'HMSTR','MANTA','ATOM','UNI','AAVE','DOT','MATIC',
-    'ADA','TRX','NEAR','FTM','OP','ARB','APT','SUI'
+  // Known stock exchanges — anything else is treated as crypto
+  const knownStocks = new Set([
+    'AAPL','MSFT','NVDA','TSLA','AMZN','GOOGL','META','JPM',
+    'BAC','WFC','AMD','INTC','MU','NFLX','DIS','V','MA',
+    'PYPL','UBER','LYFT','SNAP','TWTR','SPY','QQQ','GLD'
   ]);
-  if (cryptoTickers.has(ticker.toUpperCase())) {
-    return `${ticker.toUpperCase()}-USD`;
+
+  // Explicit overrides from TICKER_MAP
+  if (TICKER_MAP[ticker.toUpperCase()]) {
+    return TICKER_MAP[ticker.toUpperCase()];
   }
-  return ticker.toUpperCase(); // stocks stay as-is
+
+  // If it's a known stock, return as-is
+  if (knownStocks.has(ticker.toUpperCase())) {
+    return ticker.toUpperCase();
+  }
+
+  // Everything else from Invo is crypto — add -USD suffix
+  // This covers XMR, TAO, CRV, ZEC, CC, and any new tokens
+  return `${ticker.toUpperCase()}-USD`;
 }
 
 // ── Token/seen management now handled by database.js ─────────────
@@ -98,9 +109,26 @@ async function getPostDetails(postId, accessToken) {
 // ── Mirror trade to bot ───────────────────────────────────────────
 async function mirrorTrade(action, ticker) {
   const alpacaTicker = mapTicker(ticker);
+  const port = process.env.PORT || 3002;
+
   try {
-    const port = process.env.PORT || 3002;
-  const res = await fetch(`http://localhost:${port}/api/mirror-trade`, {
+    // For sells, check if we actually have a position first
+    if (action === 'sell') {
+      const posRes = await fetch(`http://localhost:${port}/api/positions`).catch(() => null);
+      if (posRes?.ok) {
+        const positions = await posRes.json();
+        const hasPosition = Object.keys(positions).some(k =>
+          k.toLowerCase() === alpacaTicker.toLowerCase() ||
+          k.toLowerCase() === ticker.toLowerCase()
+        );
+        if (!hasPosition) {
+          console.log(`[INVO] No position in ${alpacaTicker} — skipping sell`);
+          return;
+        }
+      }
+    }
+
+    const res = await fetch(`http://localhost:${port}/api/mirror-trade`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, ticker: alpacaTicker, source: 'invo' }),
