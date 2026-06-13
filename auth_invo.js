@@ -38,7 +38,8 @@ async function main() {
     body:    JSON.stringify({ email: EMAIL }),
   });
   const startData = await startRes.json();
-  console.log('OTP response:', startData);
+  console.log('\nOTP start response:', JSON.stringify(startData, null, 2));
+  console.log('OTP start status:', startRes.status);
 
   if (!startRes.ok) {
     console.error('❌ Failed to send OTP:', startData);
@@ -52,13 +53,36 @@ async function main() {
   const otp = await ask('Enter the code from your email: ');
 
   // Step 3 — Submit OTP
+  // Try to extract any session/request ID from the start response
+  const requestId = startData.requestId || startData.request_id ||
+                    startData.sessionId || startData.session_id ||
+                    startData.id || null;
+
+  console.log('\nStart response data:', JSON.stringify(startData, null, 2));
   console.log('\nSubmitting code...');
+
+  // Build payload — try common field name variations
+  const loginPayload = {
+    email:      EMAIL,
+    otp:        otp.trim(),
+    code:       otp.trim(),
+    token:      otp.trim(),
+    ...(requestId && { requestId, request_id: requestId }),
+  };
+
+  console.log('Login payload:', JSON.stringify(loginPayload, null, 2));
+
   const loginRes = await fetch(`${API_BASE}/auth/login/email`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ email: EMAIL, otp: otp.trim() }),
+    body:    JSON.stringify(loginPayload),
   });
-  const loginData = await loginRes.json();
+
+  // Log full response for debugging
+  const rawText = await loginRes.text();
+  console.log('\nRaw login response:', rawText);
+  let loginData;
+  try { loginData = JSON.parse(rawText); } catch(e) { loginData = { raw: rawText }; }
 
   if (!loginRes.ok || !loginData.accessToken) {
     console.error('❌ Login failed:', loginData);
