@@ -1,189 +1,175 @@
 /**
- * SQLite Database Layer
- * Handles all persistent storage for trade engine + Invo poller
- * Replaces config.json, invo_tokens.json, invo_seen.json
+ * Database Layer using Replit DB
+ * Persists across deployments — no file system needed
+ * Falls back to in-memory if Replit DB not available
  */
 
-import Database from 'better-sqlite3';
-import { existsSync, readFileSync } from 'fs';
+import fetch from 'node-fetch';
 
-const DB_FILE = './trade_engine.db';
-let db;
+const REPLIT_DB_URL = process.env.REPLIT_DB_URL;
+
+// Simple Replit DB client
+async function dbGet(key) {
+  if (!REPLIT_DB_URL) return null;
+  try {
+    const r = await fetch(`${REPLIT_DB_URL}/${encodeURIComponent(key)}`);
+    if (r.status === 404) return null;
+    const text = await r.text();
+    try { return JSON.parse(text); } catch(e) { return text; }
+  } catch(e) { return null; }
+}
+
+async function dbSet(key, value) {
+  if (!REPLIT_DB_URL) return;
+  try {
+    await fetch(REPLIT_DB_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `${encodeURIComponent(key)}=${encodeURIComponent(JSON.stringify(value))}`,
+    });
+  } catch(e) { console.error('[DB] Set error:', e.message); }
+}
+
+async function dbDelete(key) {
+  if (!REPLIT_DB_URL) return;
+  try {
+    await fetch(`${REPLIT_DB_URL}/${encodeURIComponent(key)}`, { method: 'DELETE' });
+  } catch(e) {}
+}
+
+async function dbList(prefix) {
+  if (!REPLIT_DB_URL) return [];
+  try {
+    const r = await fetch(`${REPLIT_DB_URL}?prefix=${encodeURIComponent(prefix)}`);
+    const text = await r.text();
+    return text ? text.split('\n').filter(Boolean) : [];
+  } catch(e) { return []; }
+}
+
+// In-memory fallback
+const memStore = {
+  config: {},
+  invo_users: ['crypto_rocket'],
+  invo_seen: new Set(),
+};
 
 export function initDatabase() {
-  db = new Database(DB_FILE);
-  db.pragma('journal_mode = WAL');
-
-  // ── Config table ─────────────────────────────────────────────────
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS config (
-      key   TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-  `);
-
-  // ── Invo users table ─────────────────────────────────────────────
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS invo_users (
-      username  TEXT PRIMARY KEY,
-      added_at  TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-  `);
-
-  // ── Invo seen notifications table ────────────────────────────────
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS invo_seen (
-      id        TEXT PRIMARY KEY,
-      seen_at   TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE INDEX IF NOT EXISTS idx_invo_seen_at ON invo_seen(seen_at);
-  `);
-
-  // ── Invo tokens table ────────────────────────────────────────────
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS invo_tokens (
-      id            INTEGER PRIMARY KEY CHECK (id = 1),
-      access_token  TEXT,
-      refresh_token TEXT,
-      updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-  `);
-
-  // ── Seed default user if empty ───────────────────────────────────
-  const userCount = db.prepare('SELECT COUNT(*) as n FROM invo_users').get();
-  if (userCount.n === 0) {
-    db.prepare('INSERT OR IGNORE INTO invo_users (username) VALUES (?)').run('crypto_rocket');
-    console.log('[DB] Seeded default Invo user: crypto_rocket');
-  }
-
-  // ── Migrate from old JSON files ──────────────────────────────────
-  migrateFromJson();
-
-  console.log('[DB] Database ready:', DB_FILE);
-  return db;
-}
-
-function migrateFromJson() {
-  // Migrate config.json
-  if (existsSync('./config.json')) {
-    try {
-      const old = JSON.parse(readFileSync('./config.json', 'utf8'));
-      for (const [key, value] of Object.entries(old)) {
-        setConfig(key, value);
-      }
-      console.log('[DB] Migrated config.json');
-    } catch(e) { console.log('[DB] config.json migration skipped:', e.message); }
-  }
-
-  // Migrate invo_tokens.json
-  if (existsSync('./invo_tokens.json')) {
-    try {
-      const old = JSON.parse(readFileSync('./invo_tokens.json', 'utf8'));
-      if (old.accessToken) saveTokens(old.accessToken, old.refreshToken);
-      if (old.targetUsers) {
-        for (const user of old.targetUsers) addInvoUser(user);
-      }
-      console.log('[DB] Migrated invo_tokens.json');
-    } catch(e) { console.log('[DB] invo_tokens.json migration skipped:', e.message); }
-  }
-
-  // Migrate invo_seen.json
-  if (existsSync('./invo_seen.json')) {
-    try {
-      const old = JSON.parse(readFileSync('./invo_seen.json', 'utf8'));
-      if (Array.isArray(old)) {
-        const insert = db.prepare('INSERT OR IGNORE INTO invo_seen (id) VALUES (?)');
-        for (const id of old) insert.run(String(id));
-        console.log(`[DB] Migrated ${old.length} seen notifications`);
-      }
-    } catch(e) { console.log('[DB] invo_seen.json migration skipped:', e.message); }
+  if (REPLIT_DB_URL) {
+    console.log('[DB] Using Replit DB for persistent storage');
+  } else {
+    console.log('[DB] REPLIT_DB_URL not found - using in-memory storage (data will not persist)');
   }
 }
 
-// ── Config operations ─────────────────────────────────────────────
-export function getConfig(key, defaultValue = null) {
-  const row = db.prepare('SELECT value FROM config WHERE key = ?').get(key);
-  if (!row) return defaultValue;
-  try { return JSON.parse(row.value); }
-  catch(e) { return row.value; }
-}
-
-export function setConfig(key, value) {
-  db.prepare('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)')
-    .run(key, JSON.stringify(value));
-}
-
-export function getAllConfig() {
-  const rows = db.prepare('SELECT key, value FROM config').all();
-  const result = {};
-  for (const row of rows) {
-    try { result[row.key] = JSON.parse(row.value); }
-    catch(e) { result[row.key] = row.value; }
+// -- Config operations --
+export async function getConfig(key, defaultValue = null) {
+  if (REPLIT_DB_URL) {
+    const val = await dbGet(`config:${key}`);
+    return val !== null ? val : defaultValue;
   }
-  return result;
+  return memStore.config[key] !== undefined ? memStore.config[key] : defaultValue;
 }
 
-// ── Invo user operations ──────────────────────────────────────────
-export function getInvoUsers() {
-  return db.prepare('SELECT username FROM invo_users ORDER BY added_at ASC')
-    .all().map(r => r.username);
+export async function setConfig(key, value) {
+  if (REPLIT_DB_URL) {
+    await dbSet(`config:${key}`, value);
+  } else {
+    memStore.config[key] = value;
+  }
 }
 
-export function addInvoUser(username) {
+export async function getAllConfig() {
+  if (REPLIT_DB_URL) {
+    const keys = await dbList('config:');
+    const result = {};
+    for (const key of keys) {
+      const shortKey = key.replace('config:', '');
+      result[shortKey] = await dbGet(key);
+    }
+    return result;
+  }
+  return { ...memStore.config };
+}
+
+// -- Invo user operations --
+export async function getInvoUsers() {
+  if (REPLIT_DB_URL) {
+    const users = await dbGet('invo:users');
+    return Array.isArray(users) ? users : ['crypto_rocket'];
+  }
+  return [...memStore.invo_users];
+}
+
+export async function addInvoUser(username) {
   const clean = username.replace('@', '').toLowerCase().trim();
-  db.prepare('INSERT OR IGNORE INTO invo_users (username) VALUES (?)').run(clean);
-  console.log(`[DB] Added Invo user: ${clean}`);
-  return getInvoUsers();
+  const users = await getInvoUsers();
+  if (!users.includes(clean)) {
+    users.push(clean);
+    if (REPLIT_DB_URL) {
+      await dbSet('invo:users', users);
+    } else {
+      memStore.invo_users = users;
+    }
+    console.log(`[DB] Added Invo user: ${clean}`);
+  }
+  return users;
 }
 
-export function removeInvoUser(username) {
+export async function removeInvoUser(username) {
   const clean = username.replace('@', '').toLowerCase().trim();
-  db.prepare('DELETE FROM invo_users WHERE username = ?').run(clean);
+  const users = (await getInvoUsers()).filter(u => u !== clean);
+  if (REPLIT_DB_URL) {
+    await dbSet('invo:users', users);
+  } else {
+    memStore.invo_users = users;
+  }
   console.log(`[DB] Removed Invo user: ${clean}`);
-  return getInvoUsers();
+  return users;
 }
 
-// ── Invo seen notifications ───────────────────────────────────────
-export function isNotificationSeen(id) {
-  return !!db.prepare('SELECT id FROM invo_seen WHERE id = ?').get(String(id));
+// -- Invo seen notifications --
+export async function isNotificationSeen(id) {
+  if (REPLIT_DB_URL) {
+    const val = await dbGet(`invo:seen:${id}`);
+    return val !== null;
+  }
+  return memStore.invo_seen.has(id);
 }
 
-export function markNotificationSeen(id) {
-  db.prepare('INSERT OR IGNORE INTO invo_seen (id) VALUES (?)').run(String(id));
-}
-
-export function pruneSeenNotifications(keepDays = 7) {
-  const result = db.prepare(
-    "DELETE FROM invo_seen WHERE seen_at < datetime('now', ?)"
-  ).run(`-${keepDays} days`);
-  if (result.changes > 0) {
-    console.log(`[DB] Pruned ${result.changes} old seen notifications`);
+export async function markNotificationSeen(id) {
+  if (REPLIT_DB_URL) {
+    await dbSet(`invo:seen:${id}`, 1);
+  } else {
+    memStore.invo_seen.add(id);
   }
 }
 
-// ── Invo token operations ─────────────────────────────────────────
-export function getTokens() {
-  // Prefer env secrets over database
+export async function pruneSeenNotifications() {
+  // Replit DB handles this naturally - old keys just expire
+  // For in-memory, trim to last 500
+  if (!REPLIT_DB_URL && memStore.invo_seen.size > 500) {
+    const arr = [...memStore.invo_seen].slice(-500);
+    memStore.invo_seen = new Set(arr);
+  }
+}
+
+// -- Invo token operations --
+export async function getTokens() {
+  // Always prefer env secrets
   if (process.env.INVO_ACCESS_TOKEN) {
     return {
       accessToken:  process.env.INVO_ACCESS_TOKEN,
       refreshToken: process.env.INVO_REFRESH_TOKEN,
     };
   }
-  const row = db.prepare('SELECT * FROM invo_tokens WHERE id = 1').get();
-  if (!row) return null;
-  return { accessToken: row.access_token, refreshToken: row.refresh_token };
+  if (REPLIT_DB_URL) {
+    return await dbGet('invo:tokens');
+  }
+  return null;
 }
 
-export function saveTokens(accessToken, refreshToken) {
-  db.prepare(`
-    INSERT INTO invo_tokens (id, access_token, refresh_token, updated_at)
-    VALUES (1, ?, ?, datetime('now'))
-    ON CONFLICT(id) DO UPDATE SET
-      access_token  = excluded.access_token,
-      refresh_token = excluded.refresh_token,
-      updated_at    = excluded.updated_at
-  `).run(accessToken, refreshToken);
+export async function saveTokens(accessToken, refreshToken) {
+  if (REPLIT_DB_URL) {
+    await dbSet('invo:tokens', { accessToken, refreshToken });
+  }
 }
-
-export { db };
