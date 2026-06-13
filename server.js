@@ -83,7 +83,7 @@ let state = {
   startupScans: 0,
   cooldowns:  {},   // ticker -> { until: timestamp, reason: string }
   ranges:     {},   // ticker -> { support, resistance, isRanging }
-  recentSells: {},  // ticker -> timestamp — prevent duplicate sells
+  recentSells: {},  // ticker -> timestamp - prevent duplicate sells
 };
 
 const defaultConfig = {
@@ -177,11 +177,11 @@ async function fetchBars(ticker, limit = 200) {
 }
 
 async function fetch15MinBars(ticker, limit = 200) {
-  // 200 x 15min bars = ~50 hours — 2 days crypto, 8 trading days stocks
+  // 200 x 15min bars = ~50 hours - 2 days crypto, 8 trading days stocks
   try {
     const sym = alpacaSym(ticker);
     const start = new Date();
-    start.setDate(start.getDate() - 3); // go back 3 days — range trading needs CURRENT price action
+    start.setDate(start.getDate() - 3); // go back 3 days - range trading needs CURRENT price action
     const startStr = start.toISOString().split('T')[0];
 
     if (isCrypto(ticker)) {
@@ -349,7 +349,7 @@ function isLowerLows(closes, lb = 10) {
 
 // ── Range detection ──────────────────────────────────────────────
 function detectRange(bars, lookback = 20) {
-  // Use last 20 bars (5 hours at 15min) — detect CURRENT ranges, not historical
+  // Use last 20 bars (5 hours at 15min) - detect CURRENT ranges, not historical
   if (bars.length < lookback) return { isRanging: false };
   const slice = bars.slice(-lookback);
   const highs = slice.map(b => b.h);
@@ -363,7 +363,7 @@ function detectRange(bars, lookback = 20) {
   const resistance = sortedHighs.slice(0, quarter).reduce((a,b) => a+b, 0) / quarter;
   const rangeSize  = (resistance - support) / support;
 
-  // Count touches — price within 2% of each level counts as a touch
+  // Count touches - price within 2% of each level counts as a touch
   let supportTouches = 0, resistanceTouches = 0;
   const supportZone    = support * 1.02;
   const resistanceZone = resistance * 0.98;
@@ -373,11 +373,11 @@ function detectRange(bars, lookback = 20) {
   }
 
   // Range criteria:
-  // 1. Range size between 1% and 8% max — not too tight (noise) not too wide (trend)
+  // 1. Range size between 1% and 8% max - not too tight (noise) not too wide (trend)
   // 2. At least 2 touches of both support AND resistance
   // 3. Price must currently be inside the range (not broken out)
   const currentPrice  = slice[slice.length - 1].c;
-  // Price must be inside the range — not broken above resistance or below support
+  // Price must be inside the range - not broken above resistance or below support
   const aboveResistance = currentPrice > resistance * 1.005; // broken above resistance
   const belowSupport    = currentPrice < support * 0.995;   // broken below support
   const insideRange     = !aboveResistance && !belowSupport;
@@ -385,8 +385,8 @@ function detectRange(bars, lookback = 20) {
   const isRanging     = rangeSize >= 0.02 && rangeSize <= 0.08
     && supportTouches >= 2 && resistanceTouches >= 2
     && insideRange;
-  if (aboveResistance) console.log(`[RANGE] ${' '.padEnd(10)} broke ABOVE resistance $${resistance?.toFixed(4)} — range invalidated`);
-  if (belowSupport)    console.log(`[RANGE] ${' '.padEnd(10)} broke BELOW support $${support?.toFixed(4)} — range invalidated`);
+  if (aboveResistance) console.log(`[RANGE] ${' '.padEnd(10)} broke ABOVE resistance $${resistance?.toFixed(4)} - range invalidated`);
+  if (belowSupport)    console.log(`[RANGE] ${' '.padEnd(10)} broke BELOW support $${support?.toFixed(4)} - range invalidated`);
 
   return { isRanging, support, resistance, rangeSize, supportTouches, resistanceTouches };
 }
@@ -439,21 +439,21 @@ function detectSignal(bars) {
   // In downtrend: positive votes = bearish signals (we want to SELL)
   // votes > 0 means "go with the trend", votes < 0 means "counter-trend noise, ignore"
 
-  // RSI — oversold in uptrend = buy opportunity, overbought in downtrend = sell opportunity
+  // RSI - oversold in uptrend = buy opportunity, overbought in downtrend = sell opportunity
   const rsi = computeRSI(closes);
   if (rsi !== null) {
     if (isUptrend && rsi < config.rsiOversold) {
       total += 2; votes += 2;
-      reasons.push(`RSI oversold (${rsi.toFixed(1)}) — uptrend dip buy`);
+      reasons.push(`RSI oversold (${rsi.toFixed(1)}) - uptrend dip buy`);
     } else if (!isUptrend && rsi > config.rsiOverbought) {
       total += 2; votes += 2;
-      reasons.push(`RSI overbought (${rsi.toFixed(1)}) — downtrend sell`);
+      reasons.push(`RSI overbought (${rsi.toFixed(1)}) - downtrend sell`);
     } else {
       total += 1; // neutral RSI still counts as a data point
     }
   }
 
-  // MACD — only count crossovers that align with trend
+  // MACD - only count crossovers that align with trend
   const { macd, signal, macdPrev, signalPrev } = computeMACD(closes);
   if (macd != null) {
     if (isUptrend && macdPrev < signalPrev && macd > signal) {
@@ -467,27 +467,27 @@ function detectSignal(bars) {
     }
   }
 
-  // Bollinger Bands — lower band in uptrend = buy, upper band in downtrend = sell
+  // Bollinger Bands - lower band in uptrend = buy, upper band in downtrend = sell
   const { upper, lower } = computeBollinger(closes);
   if (upper != null) {
     if (isUptrend && price <= lower) {
       total += 2; votes += 2;
-      reasons.push('Price at lower Bollinger — uptrend support');
+      reasons.push('Price at lower Bollinger - uptrend support');
     } else if (!isUptrend && price >= upper) {
       total += 2; votes += 2;
-      reasons.push('Price at upper Bollinger — downtrend resistance');
+      reasons.push('Price at upper Bollinger - downtrend resistance');
     } else {
       total += 1;
     }
   }
 
-  // EMA strength — how far apart are the EMAs? Wider gap = stronger trend
+  // EMA strength - how far apart are the EMAs? Wider gap = stronger trend
   if (ema20 && ema50) {
     total += 1; votes += 1; // always adds to confidence when trend is clear
     reasons.push(`EMA20 ${isUptrend ? 'above' : 'below'} EMA50 (${trendLabel.toLowerCase()})`);
   }
 
-  // Volume spike — confirms trend direction
+  // Volume spike - confirms trend direction
   const avgVol  = vols.slice(-20).reduce((a,b) => a+b, 0) / 20;
   const currVol = vols[vols.length - 1];
   if (avgVol > 0 && currVol > avgVol * 1.5) {
@@ -495,15 +495,15 @@ function detectSignal(bars) {
     reasons.push(`Volume spike confirms ${trendLabel.toLowerCase()}`);
   }
 
-  // Candlestick patterns — only count ones matching the trend
+  // Candlestick patterns - only count ones matching the trend
   if (isUptrend) {
-    if (isBullishEngulfing(bars))        { total += 2; votes += 2; reasons.push('Bullish engulfing — uptrend continuation'); }
-    if (isHammer(bars[bars.length - 1])) { total += 1; votes += 1; reasons.push('Hammer — uptrend reversal from dip'); }
-    if (isDoubleBottom(closes))          { total += 3; votes += 3; reasons.push('Double bottom — uptrend confirmed'); }
+    if (isBullishEngulfing(bars))        { total += 2; votes += 2; reasons.push('Bullish engulfing - uptrend continuation'); }
+    if (isHammer(bars[bars.length - 1])) { total += 1; votes += 1; reasons.push('Hammer - uptrend reversal from dip'); }
+    if (isDoubleBottom(closes))          { total += 3; votes += 3; reasons.push('Double bottom - uptrend confirmed'); }
     if (isBullishBreakout(closes))       { total += 2; votes += 2; reasons.push('Bullish breakout above resistance'); }
-    if (isHigherHighs(closes))           { total += 1; votes += 1; reasons.push('Higher highs — uptrend strengthening'); }
-    if (isDoji(bars[bars.length - 1]))   { total += 1; votes += 1; reasons.push('Doji — pause before uptrend continues'); }
+    if (isHigherHighs(closes))           { total += 1; votes += 1; reasons.push('Higher highs - uptrend strengthening'); }
+    if (isDoji(bars[bars.length - 1]))   { total += 1; votes += 1; reasons.push('Doji - pause before uptrend continues'); }
   } else {
-    if (isBearishEngulfing(bars))             { total += 2; votes += 2; reasons.push('Bearish engulfing — downtrend continuation'); }
-    if (isShootingStar(bars[bars.length - 1])){ total += 1; votes += 1; reasons.push('Shooting star — downtrend reversal from peak'); }
-    if (isDoubleTop(closes))                  { total += 3; votes += 3; reasons.push('Double top — downtrend c
+    if (isBearishEngulfing(bars))             { total += 2; votes += 2; reasons.push('Bearish engulfing - downtrend continuation'); }
+    if (isShootingStar(bars[bars.length - 1])){ total += 1; votes += 1; reasons.push('Shooting star - downtrend reversal from peak'); }
+    if (isDoubleTop(closes))                  { total += 3; votes += 3; reasons.push('Double top - downtrend c
