@@ -893,6 +893,34 @@ app.post('/api/mirror-trade', async (req, res) => {
 });
 
 // -- Invo controls ------------------------------------------------
+// -- Invo test endpoint -- trigger a fake trade to test the pipeline
+app.post('/api/invo/test', async (req, res) => {
+  const { ticker = 'ETH-USD', action = 'buy' } = req.body;
+  console.log(`[INVO TEST] Simulating ${action.toUpperCase()} ${ticker}`);
+  try {
+    const price = state.prices[ticker] || await fetchLatestPrice(ticker);
+    if (!price) return res.status(404).json({ error: `No price found for ${ticker}` });
+    if (action === 'buy') {
+      const deployed = Object.values(state.positions)
+        .reduce((s, p) => s + p.avg_cost * p.shares, 0);
+      if (deployed + config.maxPositionUsd > config.totalBudgetUsd)
+        return res.status(400).json({ error: 'Budget cap reached' });
+      if (state.positions[ticker])
+        return res.status(400).json({ error: `Already have position in ${ticker}` });
+      await executeBuy(ticker, price);
+    } else {
+      const posKey = Object.keys(state.positions).find(k =>
+        k.toLowerCase() === ticker.toLowerCase()
+      );
+      if (!posKey) return res.status(400).json({ error: `No position in ${ticker}` });
+      await executeSell(ticker, price);
+    }
+    res.json({ success: true, action, ticker, price });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/invo/status', (req, res) => {
   res.json({ running: invoState.running, users: getInvoUsers() });
 });
