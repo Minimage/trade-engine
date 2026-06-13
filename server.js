@@ -980,7 +980,7 @@ app.get('*', (req, res) => {
 });
 
 // ── Start server ──────────────────────────────────────────────────
-const server = const server = app.listen(PORT, async () => {
+const server = app.listen(PORT, async () => {
   console.log(`[SERVER] Trade engine running on port ${PORT}`);
   await refreshAccount();
   await syncPositions();
