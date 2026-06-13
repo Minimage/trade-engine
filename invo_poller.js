@@ -99,7 +99,8 @@ async function getPostDetails(postId, accessToken) {
 async function mirrorTrade(action, ticker) {
   const alpacaTicker = mapTicker(ticker);
   try {
-    const res = await fetch('http://localhost:3002/api/mirror-trade', {
+    const port = process.env.PORT || 3002;
+  const res = await fetch(`http://localhost:${port}/api/mirror-trade`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action, ticker: alpacaTicker, source: 'invo' }),
