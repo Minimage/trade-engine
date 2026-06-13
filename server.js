@@ -100,23 +100,31 @@ const defaultConfig = {
   paperMode:       false,
 };
 
-function loadConfig() {
-  const saved = getAllConfig();
-  if (Object.keys(saved).length > 0) {
-    console.log('[CONFIG] Loaded config from database');
-    return { ...defaultConfig, ...saved };
+// Config loads async from Replit DB — start with defaults, update after connect
+let config = { ...defaultConfig };
+
+async function loadConfig() {
+  try {
+    const saved = await getAllConfig();
+    if (Object.keys(saved).length > 0) {
+      config = { ...defaultConfig, ...saved };
+      console.log('[CONFIG] Loaded config from database');
+    }
+  } catch(e) {
+    console.error('[CONFIG] Failed to load config:', e.message);
   }
-  return { ...defaultConfig };
 }
 
-function saveConfig() {
-  for (const [key, value] of Object.entries(config)) {
-    setConfig(key, value);
+async function saveConfig() {
+  try {
+    for (const [key, value] of Object.entries(config)) {
+      await setConfig(key, value);
+    }
+    console.log('[CONFIG] Saved config to database');
+  } catch(e) {
+    console.error('[CONFIG] Failed to save config:', e.message);
   }
-  console.log('[CONFIG] Saved config to database');
 }
-
-let config = loadConfig();
 
 let botTimer = null;
 
@@ -893,8 +901,36 @@ app.post('/api/mirror-trade', async (req, res) => {
 });
 
 // -- Invo controls ------------------------------------------------
-app.get('/api/invo/status', (req, res) => {
-  res.json({ running: invoState.running, users: getInvoUsers() });
+// -- Invo test endpoint -- trigger a fake trade to test the pipeline
+app.post('/api/invo/test', async (req, res) => {
+  const { ticker = 'ETH-USD', action = 'buy' } = req.body;
+  console.log(`[INVO TEST] Simulating ${action.toUpperCase()} ${ticker}`);
+  try {
+    const price = state.prices[ticker] || await fetchLatestPrice(ticker);
+    if (!price) return res.status(404).json({ error: `No price found for ${ticker}` });
+    if (action === 'buy') {
+      const deployed = Object.values(state.positions)
+        .reduce((s, p) => s + p.avg_cost * p.shares, 0);
+      if (deployed + config.maxPositionUsd > config.totalBudgetUsd)
+        return res.status(400).json({ error: 'Budget cap reached' });
+      if (state.positions[ticker])
+        return res.status(400).json({ error: `Already have position in ${ticker}` });
+      await executeBuy(ticker, price);
+    } else {
+      const posKey = Object.keys(state.positions).find(k =>
+        k.toLowerCase() === ticker.toLowerCase()
+      );
+      if (!posKey) return res.status(400).json({ error: `No position in ${ticker}` });
+      await executeSell(ticker, price);
+    }
+    res.json({ success: true, action, ticker, price });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/invo/status', async (req, res) => {
+  res.json({ running: invoState.running, users: await getInvoUsers() });
 });
 
 app.post('/api/invo/start', async (req, res) => {
@@ -918,18 +954,18 @@ app.post('/api/invo/stop', (req, res) => {
 
 app.get('/api/invo/users', (req, res) => res.json(getInvoUsers()));
 
-app.post('/api/invo/users/add', (req, res) => {
+app.post('/api/invo/users/add', async (req, res) => {
   const { username } = req.body;
   if (!username) return res.status(400).json({ error: 'username required' });
-  addInvoUser(username);
-  res.json({ success: true, users: getInvoUsers() });
+  const users = await addInvoUser(username);
+  res.json({ success: true, users });
 });
 
-app.post('/api/invo/users/remove', (req, res) => {
+app.post('/api/invo/users/remove', async (req, res) => {
   const { username } = req.body;
   if (!username) return res.status(400).json({ error: 'username required' });
-  removeInvoUser(username);
-  res.json({ success: true, users: getInvoUsers() });
+  const users = await removeInvoUser(username);
+  res.json({ success: true, users });
 });
 app.get('/api/cooldowns', (req, res) => res.json(state.cooldowns));
 app.get('/api/ranges',    (req, res) => res.json(state.ranges));
@@ -943,7 +979,7 @@ app.post('/api/config', (req, res) => {
   for (const key of allowed) {
     if (req.body[key] !== undefined) config[key] = req.body[key];
   }
-  saveConfig();
+  await saveConfig();
   res.json({ success: true, config });
 });
 
@@ -1018,6 +1054,7 @@ app.get('*', (req, res) => {
 // -- Start server --------------------------------------------------
 const server = app.listen(PORT, async () => {
   console.log(`[SERVER] Trade engine running on port ${PORT}`);
+  await loadConfig();
   await refreshAccount();
   await syncPositions();
   // Invo poller is controlled via API - don't auto-start

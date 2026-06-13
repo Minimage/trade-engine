@@ -671,6 +671,37 @@ export default function App() {
             ))}
           </div>
 
+          <div style={{ marginTop: 16, marginBottom: 8, color: "#4A5568", fontFamily: "monospace", fontSize: 11 }}>TEST PIPELINE</div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <input id="testTicker" defaultValue="ETH-USD" style={{
+              background: "#1A1F2E", border: "none", borderRadius: 4,
+              padding: "6px 10px", color: C.text, fontFamily: "monospace", fontSize: 11, width: 100
+            }} />
+            <button onClick={async () => {
+              const ticker = document.getElementById("testTicker").value;
+              const r = await fetch("/api/invo/test", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ticker, action: "buy" })
+              });
+              const d = await r.json();
+              alert(d.success ? `TEST BUY ${ticker} @ $${d.price}` : `Failed: ${d.error}`);
+            }} style={{ background: C.green, color: C.bg, border: "none", borderRadius: 4,
+              padding: "6px 12px", fontFamily: "monospace", fontSize: 11, cursor: "pointer" }}>
+              TEST BUY
+            </button>
+            <button onClick={async () => {
+              const ticker = document.getElementById("testTicker").value;
+              const r = await fetch("/api/invo/test", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ticker, action: "sell" })
+              });
+              const d = await r.json();
+              alert(d.success ? `TEST SELL ${ticker} @ $${d.price}` : `Failed: ${d.error}`);
+            }} style={{ background: "#FF4444", color: "white", border: "none", borderRadius: 4,
+              padding: "6px 12px", fontFamily: "monospace", fontSize: 11, cursor: "pointer" }}>
+              TEST SELL
+            </button>
+          </div>
           <div style={{ color: "#4A5568", fontFamily: "monospace", fontSize: 10 }}>
             Polls Invo every 60s • Only mirrors LONG trades • Skips SHORT positions
           </div>
