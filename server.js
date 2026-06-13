@@ -2,7 +2,11 @@ import express from 'express';
 import cors from 'cors';
 import fetch from 'node-fetch';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { startInvoPoller, getInvoUsers, addInvoUser, removeInvoUser } from './invo_poller.js';
+import { initDatabase, getConfig, setConfig, getAllConfig, addInvoUser, removeInvoUser, getInvoUsers } from './database.js';
+import { startInvoPoller } from './invo_poller.js';
+
+// Initialize database first
+initDatabase();
 
 const app  = express();
 const PORT = process.env.PORT || 3002;
@@ -82,8 +86,6 @@ let state = {
   recentSells: {},  // ticker -> timestamp — prevent duplicate sells
 };
 
-const CONFIG_FILE = './config.json';
-
 const defaultConfig = {
   tickers: ['AAPL','MSFT','NVDA','TSLA','ETH-USD','SOL-USD',
             'XRP-USD','DOGE-USD','AVAX-USD','LINK-USD','LTC-USD'],
@@ -98,27 +100,20 @@ const defaultConfig = {
   paperMode:       false,
 };
 
-// Load saved config from disk, fall back to defaults
 function loadConfig() {
-  try {
-    if (existsSync(CONFIG_FILE)) {
-      const saved = JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
-      console.log('[CONFIG] Loaded saved config from disk');
-      return { ...defaultConfig, ...saved };
-    }
-  } catch(e) {
-    console.error('[CONFIG] Failed to load config:', e.message);
+  const saved = getAllConfig();
+  if (Object.keys(saved).length > 0) {
+    console.log('[CONFIG] Loaded config from database');
+    return { ...defaultConfig, ...saved };
   }
   return { ...defaultConfig };
 }
 
 function saveConfig() {
-  try {
-    writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
-    console.log('[CONFIG] Saved config to disk');
-  } catch(e) {
-    console.error('[CONFIG] Failed to save config:', e.message);
+  for (const [key, value] of Object.entries(config)) {
+    setConfig(key, value);
   }
+  console.log('[CONFIG] Saved config to database');
 }
 
 let config = loadConfig();
