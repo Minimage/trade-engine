@@ -23,7 +23,7 @@ if (existsSync(distPath)) {
   app.use(express.static(distPath));
 }
 
-// ── Alpaca config ─────────────────────────────────────────────────
+// -- Alpaca config -------------------------------------------------
 const ALPACA_KEY    = process.env.ALPACA_KEY    || 'PK7FVW3V4B3SIYZ5ILOEEONJPZ';
 const ALPACA_SECRET = process.env.ALPACA_SECRET || 'BRPgtEn6mbM57jirhZ4ftn4fXT8NK4QRugVL8Eaks52u';
 const ALPACA_BASE   = 'https://paper-api.alpaca.markets/v2';
@@ -66,7 +66,7 @@ const isCrypto     = t => t.endsWith('-USD');
 const alpacaSym    = t => isCrypto(t) ? (CRYPTO_MAP[t] || t.replace('-','/')) : t;
 const displayName  = t => isCrypto(t) ? t.replace('-USD','') : t;
 
-// ── Bot state ─────────────────────────────────────────────────────
+// -- Bot state -----------------------------------------------------
 let invoState = {
   running: false,
   intervalId: null,
@@ -120,7 +120,7 @@ let config = loadConfig();
 
 let botTimer = null;
 
-// ── Alpaca helpers ────────────────────────────────────────────────
+// -- Alpaca helpers ------------------------------------------------
 async function alpacaGet(path, base = ALPACA_BASE) {
   const r = await fetch(`${base}${path}`, { headers: HEADERS });
   const text = await r.text();
@@ -143,7 +143,7 @@ async function alpacaDelete(path) {
   return true;
 }
 
-// ── Market data ───────────────────────────────────────────────────
+// -- Market data ---------------------------------------------------
 async function fetchBars(ticker, limit = 200) {
   try {
     const sym = alpacaSym(ticker);
@@ -231,7 +231,7 @@ async function fetchLatestPrice(ticker) {
 
 
 
-// ── Technical indicators ──────────────────────────────────────────
+// -- Technical indicators ------------------------------------------
 function computeRSI(closes, period = 14) {
   if (closes.length < period + 1) return null;
   const deltas = closes.slice(1).map((c, i) => c - closes[i]);
@@ -280,7 +280,7 @@ function computeEMA(closes, span) {
   return closes.reduce((acc, v, i) => i === 0 ? v : acc * (1-k) + v * k, closes[0]);
 }
 
-// ── Candlestick pattern helpers ──────────────────────────────────
+// -- Candlestick pattern helpers ----------------------------------
 function isBullishEngulfing(bars) {
   if (bars.length < 2) return false;
   const p = bars[bars.length - 2], c = bars[bars.length - 1];
@@ -347,7 +347,7 @@ function isLowerLows(closes, lb = 10) {
   return s.filter((v, i) => i > 0 && v < s[i-1]).length > lb * 0.6;
 }
 
-// ── Range detection ──────────────────────────────────────────────
+// -- Range detection ----------------------------------------------
 function detectRange(bars, lookback = 20) {
   // Use last 20 bars (5 hours at 15min) - detect CURRENT ranges, not historical
   if (bars.length < lookback) return { isRanging: false };
@@ -391,7 +391,7 @@ function detectRange(bars, lookback = 20) {
   return { isRanging, support, resistance, rangeSize, supportTouches, resistanceTouches };
 }
 
-// ── Trend reversal detection (for cooldown recovery) ─────────────
+// -- Trend reversal detection (for cooldown recovery) -------------
 function isTrendReversing(bars) {
   if (bars.length < 50) return false;
   const closes = bars.map(b => b.c);
@@ -428,13 +428,13 @@ function detectSignal(bars) {
   let votes = 0, total = 0;
   const reasons = [];
 
-  // ── Step 1: Determine primary trend using EMA ─────────────────
+  // -- Step 1: Determine primary trend using EMA -----------------
   const ema20 = computeEMA(closes, 20);
   const ema50 = computeEMA(closes, 50);
   const isUptrend = ema20 && ema50 && ema20 > ema50;
   const trendLabel = isUptrend ? 'UPTREND' : 'DOWNTREND';
 
-  // ── Step 2: Only count confirming indicators ──────────────────
+  // -- Step 2: Only count confirming indicators ------------------
   // In uptrend: positive votes = bullish signals (we want to BUY)
   // In downtrend: positive votes = bearish signals (we want to SELL)
   // votes > 0 means "go with the trend", votes < 0 means "counter-trend noise, ignore"
@@ -506,4 +506,533 @@ function detectSignal(bars) {
   } else {
     if (isBearishEngulfing(bars))             { total += 2; votes += 2; reasons.push('Bearish engulfing - downtrend continuation'); }
     if (isShootingStar(bars[bars.length - 1])){ total += 1; votes += 1; reasons.push('Shooting star - downtrend reversal from peak'); }
-    if (isDoubleTop(closes))                  { total += 3; votes += 3; reasons.push('Double top - downtrend c
+    if (isDoubleTop(closes))                  { total += 3; votes += 3; reasons.push('Double top - downtrend confirmed'); }
+    if (isBearishBreakdown(closes))           { total += 2; votes += 2; reasons.push('Bearish breakdown below support'); }
+    if (isLowerLows(closes))                  { total += 1; votes += 1; reasons.push('Lower lows - downtrend strengthening'); }
+    if (isDoji(bars[bars.length - 1]))        { total += 1; votes += 1; reasons.push('Doji - pause before downtrend continues'); }
+  }
+
+  if (total === 0) return { action:'hold', confidence:0, reasons:['No data'], rsi, price };
+
+  const confidence = votes / total;
+  let action = 'hold';
+
+  // In uptrend - high confidence = BUY
+  // In downtrend - high confidence = SELL
+  if (confidence >= config.minConfidence) {
+    action = isUptrend ? 'buy' : 'sell';
+  }
+
+  console.log(`[SIGNAL] ${trendLabel} ${action.padEnd(4)} conf=${(confidence*100).toFixed(0)}% votes=${votes}/${total} | ${reasons.slice(0,2).join(', ')}`);
+  return {
+    action,
+    confidence: Math.round(confidence * 100) / 100,
+    reasons: reasons.length ? reasons : ['No strong signal'],
+    rsi: rsi ? Math.round(rsi * 10) / 10 : null,
+    price,
+    trend: trendLabel,
+    votes, total
+  };
+}
+
+// -- Account & position sync ---------------------------------------
+async function refreshAccount() {
+  try {
+    state.account = await alpacaGet('/account');
+  } catch(e) { console.error('[ACCOUNT]', e.message); }
+}
+
+function matchTicker(alpacaSymbol) {
+  // Try exact match first (e.g. AAPL)
+  if (config.tickers.includes(alpacaSymbol)) return alpacaSymbol;
+  // Try CRYPTO_MAP match (e.g. BTC/USD -> BTC-USD)
+  const fromMap = Object.keys(CRYPTO_MAP).find(k => CRYPTO_MAP[k] === alpacaSymbol);
+  if (fromMap) return fromMap;
+  // Try ETHUSD -> ETH-USD (Alpaca sometimes returns without slash)
+  const withDash = alpacaSymbol.replace(/([A-Z]+)(USD)$/, '$1-$2');
+  if (config.tickers.includes(withDash)) return withDash;
+  // Try ETH/USD -> ETH-USD
+  const slashToDash = alpacaSymbol.replace('/', '-');
+  if (config.tickers.includes(slashToDash)) return slashToDash;
+  return null;
+}
+
+async function syncPositions() {
+  try {
+    const alpacaPos = await alpacaGet('/positions');
+    console.log(`[SYNC] Found ${alpacaPos.length} positions on Alpaca`);
+    const synced = {};
+    for (const pos of alpacaPos) {
+      console.log(`[SYNC] Raw position symbol: ${pos.symbol}`);
+      const ticker = matchTicker(pos.symbol);
+      if (!ticker) {
+        console.log(`[SYNC] Could not match ${pos.symbol} to watchlist - skipping`);
+        continue;
+      }
+      console.log(`[SYNC] Matched ${pos.symbol} -> ${ticker}`);
+      synced[ticker] = {
+        shares:        parseFloat(pos.qty),
+        avg_cost:      parseFloat(pos.avg_entry_price),
+        current_price: parseFloat(pos.current_price),
+        pnl:           parseFloat(pos.unrealized_pl),
+        pnl_pct:       parseFloat(pos.unrealized_plpc) * 100,
+        asset_type:    isCrypto(ticker) ? 'crypto' : 'stock',
+        synced:        true,
+      };
+    }
+    // Keep paper positions that aren't in Alpaca
+    for (const [t, p] of Object.entries(state.positions)) {
+      if (!p.synced && !synced[t]) synced[t] = p;
+    }
+    state.positions = synced;
+    console.log(`[SYNC] Done - ${Object.keys(synced).length} positions loaded`);
+  } catch(e) { console.error('[SYNC]', e.message); }
+}
+
+// -- Trade execution -----------------------------------------------
+async function executeBuy(ticker, price) {
+  const shares = config.maxPositionUsd / price;
+  const logEntry = {
+    time: new Date().toISOString(), ticker, action: 'BUY',
+    price, shares, paper: config.paperMode,
+    asset_type: isCrypto(ticker) ? 'crypto' : 'stock',
+  };
+
+  if (!config.paperMode) {
+    try {
+      // Alpaca crypto orders use BTC/USD format with slash
+      const orderSym = isCrypto(ticker)
+        ? alpacaSym(ticker)  // e.g. BTC/USD
+        : ticker;            // e.g. AAPL
+      // For crypto, use qty instead of notional to avoid ambiguity
+      // qty = dollars / price, rounded to 8 decimal places
+      const orderPayload = isCrypto(ticker) ? {
+        symbol:        orderSym,
+        qty:           (config.maxPositionUsd / price).toFixed(8),
+        side:          'buy',
+        type:          'market',
+        time_in_force: 'gtc',
+      } : {
+        symbol:        orderSym,
+        notional:      config.maxPositionUsd.toFixed(2),
+        side:          'buy',
+        type:          'market',
+        time_in_force: 'day',
+      };
+      console.log(`[ORDER] Placing buy payload: ${JSON.stringify(orderPayload)}`);
+      const order = await alpacaPost('/orders', orderPayload);
+      console.log(`[ORDER] BUY response: status=${order.status} id=${order.id} symbol=${order.symbol} asset_class=${order.asset_class} filled_qty=${order.filled_qty}`);
+      logEntry.status   = order.status || 'submitted';
+      logEntry.order_id = order.id;
+    } catch(e) {
+      logEntry.status = `error: ${e.message}`;
+      console.error(`[ORDER] BUY ${ticker} failed:`, e.message);
+      state.trades.unshift(logEntry);
+      return e.message;
+    }
+  } else {
+    logEntry.status = 'paper';
+    state.positions[ticker] = {
+      shares, avg_cost: price, current_price: price,
+      pnl: 0, pnl_pct: 0,
+      asset_type: isCrypto(ticker) ? 'crypto' : 'stock',
+    };
+  }
+
+  state.trades.unshift(logEntry);
+  if (!config.paperMode) await syncPositions();
+  await refreshAccount();
+  return null;
+}
+
+async function executeSell(ticker, price) {
+  const pos = state.positions[ticker];
+  if (!pos) return 'No position found';
+  const pnl = (price - pos.avg_cost) * pos.shares;
+  const logEntry = {
+    time: new Date().toISOString(), ticker, action: 'SELL',
+    price, shares: pos.shares, pnl, paper: config.paperMode,
+    asset_type: pos.asset_type,
+  };
+
+  if (!config.paperMode) {
+    try {
+      const sellSym = isCrypto(ticker) ? alpacaSym(ticker) : ticker;  // BTC/USD or AAPL
+      console.log(`[ORDER] Placing sell: symbol=${sellSym}`);
+      // Position endpoint uses BTCUSD format (no slash) even though orders use BTC/USD
+      const positionSym = sellSym.replace('/', '');
+      await alpacaDelete(`/positions/${positionSym}`);
+      logEntry.status = 'executed';
+      console.log(`[ORDER] SELL ${ticker} @ ${price} pnl=${pnl.toFixed(2)}`);
+    } catch(e) {
+      logEntry.status = `error: ${e.message}`;
+      console.error(`[ORDER] SELL ${ticker} failed:`, e.message);
+      state.trades.unshift(logEntry);
+      return e.message;
+    }
+  } else {
+    logEntry.status = 'paper';
+    delete state.positions[ticker];
+  }
+
+  state.trades.unshift(logEntry);
+  if (!config.paperMode) await syncPositions();
+  await refreshAccount();
+  return null;
+}
+
+// -- Bot scan loop -------------------------------------------------
+async function runScan() {
+  console.log(`[SCAN] Starting - ${config.tickers.length} tickers`);
+  for (const ticker of config.tickers) {
+    try {
+      const bars       = await fetchBars(ticker, 100);
+      const hourlyBars = await fetch15MinBars(ticker, 200);
+      const signal     = detectSignal(bars);
+      const price      = await fetchLatestPrice(ticker) || signal.price;
+      signal.price     = price;
+      state.signals[ticker] = signal;
+      state.prices[ticker]  = price;
+
+      // Update current price in positions
+      if (state.positions[ticker]) {
+        const pos = state.positions[ticker];
+        pos.current_price = price;
+        pos.pnl     = (price - pos.avg_cost) * pos.shares;
+        pos.pnl_pct = (price - pos.avg_cost) / pos.avg_cost * 100;
+      }
+
+      const inPos = ticker in state.positions;
+
+      // Exit logic - skip selling on first 2 scans after startup to avoid selling on restart
+      if (inPos && price && price > 0 && state.startupScans > 2) {
+        const pos = state.positions[ticker];
+        const pct = (price - pos.avg_cost) / pos.avg_cost * 100;
+        const range = state.ranges[ticker];
+        const posIsRanging = range?.isRanging && pos.avg_cost <= range.support * 1.03;
+
+        // Determine profit target - use range resistance if in range mode, else fixed %
+        const profitTarget = posIsRanging && range?.resistance
+          ? (range.resistance - pos.avg_cost) / pos.avg_cost * 100
+          : config.profitTargetPct;
+
+        // Safety override: if up more than profitTargetPct, always sell even in range mode
+        const safetyOverride = pct >= config.profitTargetPct && posIsRanging;
+        // Don't sell same ticker twice within 2 minutes - prevents duplicate sell orders
+        const recentSell = state.recentSells[ticker];
+        const soldRecently = recentSell && Date.now() - recentSell < 2 * 60 * 1000;
+
+        if ((pct >= profitTarget || safetyOverride) && !soldRecently) {
+          const reason = safetyOverride
+            ? `safety override - up ${pct.toFixed(1)}% exceeds ${config.profitTargetPct}% minimum`
+            : posIsRanging ? `range resistance hit ($${range.resistance?.toFixed(4)})`
+            : `profit target (+${pct.toFixed(1)}%)`;
+          console.log(`[BOT] Selling ${ticker} - ${reason}`);
+          state.recentSells[ticker] = Date.now();
+          await executeSell(ticker, price);
+        } else if (pct <= -config.stopLossPct) {
+          if (!soldRecently) {
+            console.log(`[BOT] Selling ${ticker} - stop loss hit (${pct.toFixed(1)}%) - adding cooldown`);
+            state.cooldowns[ticker] = {
+              until:  Date.now() + 30 * 60 * 1000,
+              reason: `stop loss @ $${price?.toFixed(4)}`,
+            };
+            state.recentSells[ticker] = Date.now();
+            await executeSell(ticker, price);
+          }
+        } else if (signal.action === 'sell' && !posIsRanging && !soldRecently) {
+          console.log(`[BOT] Selling ${ticker} - sell signal`);
+          state.recentSells[ticker] = Date.now();
+          await executeSell(ticker, price);
+        }
+      }
+
+      // Detect range using hourly bars for intraday precision
+      const rangeInfo = detectRange(hourlyBars.length >= 20 ? hourlyBars : bars);
+      state.ranges[ticker] = rangeInfo;
+      if (rangeInfo.isRanging) {
+        console.log(`[RANGE] ${ticker} ranging $${rangeInfo.support?.toFixed(4)}-$${rangeInfo.resistance?.toFixed(4)} (${rangeInfo.rangeSize ? (rangeInfo.rangeSize*100).toFixed(1) : '?'}% range, ${rangeInfo.supportTouches} support / ${rangeInfo.resistanceTouches} resistance touches)`);
+      }
+
+      // Check cooldown
+      const cooldown = state.cooldowns[ticker];
+      const onCooldown = cooldown && Date.now() < cooldown.until;
+
+      // If on cooldown, check if trend is reversing - if so, lift cooldown early
+      if (onCooldown) {
+        if (isTrendReversing(bars)) {
+          console.log(`[BOT] ${ticker} trend reversing - lifting cooldown early`);
+          delete state.cooldowns[ticker];
+        } else {
+          const remaining = Math.round((cooldown.until - Date.now()) / 60000);
+          state.signals[ticker].blocked = `Cooldown: ${cooldown.reason} (${remaining}m left)`;
+        }
+      }
+
+      // Entry logic
+      const stillOnCooldown = state.cooldowns[ticker] && Date.now() < state.cooldowns[ticker].until;
+
+      if (!inPos && !stillOnCooldown) {
+        const deployed = Object.values(state.positions)
+          .reduce((s, p) => s + p.avg_cost * p.shares, 0);
+
+        if (deployed + config.maxPositionUsd > config.totalBudgetUsd) {
+          state.signals[ticker].blocked = 'Budget cap reached';
+        } else if (!isCrypto(ticker) && !(await isMarketOpen())) {
+          state.signals[ticker].blocked = 'Market closed';
+        } else {
+          const sym = isCrypto(ticker) ? (CRYPTO_MAP[ticker] || ticker.replace('-','/')).replace('/','') : ticker;
+          if (await hasPendingOrder(sym)) {
+            state.signals[ticker].blocked = 'Order already pending';
+          } else if (rangeInfo.isRanging) {
+            // Range trading - but still respect market hours for stocks
+            if (!isCrypto(ticker) && !(await isMarketOpen())) {
+              state.signals[ticker].blocked = 'Market closed';
+            } else {
+              const currentPrice = price;
+              const nearSupport  = currentPrice <= rangeInfo.support * 1.02;
+              if (nearSupport) {
+                console.log(`[BOT] ${ticker} RANGE BUY near support $${rangeInfo.support?.toFixed(4)} resistance $${rangeInfo.resistance?.toFixed(4)}`);
+                state.signals[ticker].rangeMode = true;
+                state.signals[ticker].support    = rangeInfo.support;
+                state.signals[ticker].resistance = rangeInfo.resistance;
+                await executeBuy(ticker, price);
+              } else {
+                state.signals[ticker].blocked = `Ranging - waiting for support ($${rangeInfo.support?.toFixed(4)})`;
+              }
+            }
+          } else if (signal.action === 'buy') {
+            console.log(`[BOT] Buying ${ticker} @ ${price}`);
+            await executeBuy(ticker, price);
+          }
+        }
+      }
+    } catch(e) {
+      console.error(`[SCAN] ${ticker} error:`, e.message);
+    }
+  }
+
+  await syncPositions();
+  await refreshAccount();
+  state.lastScan = new Date().toISOString();
+  state.startupScans++;
+  console.log(`[SCAN] Done - ${Object.keys(state.signals).length} signals, ${Object.keys(state.positions).length} positions (scan #${state.startupScans})`);
+}
+
+// -- API routes ----------------------------------------------------
+app.get('/api/status', (req, res) => res.json({
+  botRunning: state.botRunning,
+  lastScan:   state.lastScan,
+  paperMode:  config.paperMode,
+  tickers:    config.tickers,
+}));
+
+app.get('/api/account', (req, res) => {
+  const deployed = Object.values(state.positions)
+    .reduce((s, p) => s + (p.avg_cost * p.shares), 0);
+  res.json({
+    ...state.account,
+    deployed_capital:  Math.round(deployed * 100) / 100,
+    total_budget_usd:  config.totalBudgetUsd,
+    budget_remaining:  Math.max(0, config.totalBudgetUsd - deployed),
+    budget_used_pct:   config.totalBudgetUsd > 0 ? Math.round(deployed / config.totalBudgetUsd * 10000) / 100 : 0,
+  });
+});
+
+app.get('/api/signals',   (req, res) => res.json(state.signals));
+
+// -- Mirror trade endpoint (receives signals from Invo bot) --------
+app.post('/api/mirror-trade', async (req, res) => {
+  const { ticker, action, source } = req.body;
+  if (!ticker || !action) return res.status(400).json({ error: 'ticker and action required' });
+
+  console.log(`[MIRROR] ${source || 'invo'} signal: ${action.toUpperCase()} ${ticker}`);
+
+  try {
+    if (action === 'buy') {
+      // Check budget
+      const deployed = Object.values(state.positions)
+        .reduce((s, p) => s + p.avg_cost * p.shares, 0);
+      if (deployed + config.maxPositionUsd > config.totalBudgetUsd) {
+        return res.status(400).json({ error: 'Budget cap reached' });
+      }
+      if (state.positions[ticker]) {
+        return res.status(400).json({ error: `Already have position in ${ticker}` });
+      }
+
+      // Fetch price directly from Alpaca - works for ANY ticker not just watchlist
+      const price = state.prices[ticker] || await fetchLatestPrice(ticker);
+      if (!price) return res.status(404).json({ error: `Could not fetch price for ${ticker}` });
+
+      await executeBuy(ticker, price);
+      res.json({ success: true, action: 'buy', ticker, price });
+
+    } else if (action === 'sell') {
+      // For sells, find position by ticker - check both exact match and variations
+      const posKey = Object.keys(state.positions).find(k =>
+        k.toLowerCase() === ticker.toLowerCase()
+      );
+
+      if (!posKey) {
+        return res.status(400).json({ error: `No position in ${ticker} to sell` });
+      }
+
+      const price = state.prices[ticker] || await fetchLatestPrice(ticker);
+      if (!price) return res.status(404).json({ error: `Could not fetch price for ${ticker}` });
+
+      await executeSell(ticker, price);
+      res.json({ success: true, action: 'sell', ticker, price });
+
+    } else {
+      res.status(400).json({ error: `Unknown action: ${action}` });
+    }
+  } catch(e) {
+    console.error(`[MIRROR] Error:`, e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// -- Invo controls ------------------------------------------------
+app.get('/api/invo/status', (req, res) => {
+  res.json({ running: invoState.running, users: getInvoUsers() });
+});
+
+app.post('/api/invo/start', async (req, res) => {
+  if (invoState.running) return res.json({ success: true, message: 'Already running' });
+  invoState.running = true;
+  console.log('[INVO] Poller started via API');
+  startInvoPoller(invoState).catch(e => console.error('[INVO] Poller error:', e.message));
+  res.json({ success: true, message: 'Invo poller started' });
+});
+
+app.post('/api/invo/stop', (req, res) => {
+  if (!invoState.running) return res.json({ success: true, message: 'Already stopped' });
+  invoState.running = false;
+  if (invoState.intervalId) {
+    clearInterval(invoState.intervalId);
+    invoState.intervalId = null;
+  }
+  console.log('[INVO] Poller stopped via API');
+  res.json({ success: true, message: 'Invo poller stopped' });
+});
+
+app.get('/api/invo/users', (req, res) => res.json(getInvoUsers()));
+
+app.post('/api/invo/users/add', (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.status(400).json({ error: 'username required' });
+  addInvoUser(username);
+  res.json({ success: true, users: getInvoUsers() });
+});
+
+app.post('/api/invo/users/remove', (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.status(400).json({ error: 'username required' });
+  removeInvoUser(username);
+  res.json({ success: true, users: getInvoUsers() });
+});
+app.get('/api/cooldowns', (req, res) => res.json(state.cooldowns));
+app.get('/api/ranges',    (req, res) => res.json(state.ranges));
+app.get('/api/positions', (req, res) => res.json(state.positions));
+app.get('/api/trades',    (req, res) => res.json(state.trades.slice(0, 50)));
+app.get('/api/config',    (req, res) => res.json(config));
+
+app.post('/api/config', (req, res) => {
+  const allowed = ['tickers','maxPositionUsd','totalBudgetUsd','minConfidence',
+    'rsiOversold','rsiOverbought','profitTargetPct','stopLossPct','scanIntervalSec','paperMode'];
+  for (const key of allowed) {
+    if (req.body[key] !== undefined) config[key] = req.body[key];
+  }
+  saveConfig();
+  res.json({ success: true, config });
+});
+
+app.post('/api/connect', async (req, res) => {
+  try {
+    const account = await alpacaGet('/account');
+    state.account = account;
+    await syncPositions();
+    res.json({ success: true, account });
+  } catch(e) {
+    res.status(400).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/bot/start', async (req, res) => {
+  if (state.botRunning) return res.json({ success: true, message: 'Already running' });
+  state.botRunning = true;
+  await runScan();
+  botTimer = setInterval(runScan, config.scanIntervalSec * 1000);
+  res.json({ success: true });
+});
+
+app.post('/api/bot/stop', (req, res) => {
+  clearInterval(botTimer);
+  state.botRunning = false;
+  res.json({ success: true });
+});
+
+app.post('/api/scan', async (req, res) => {
+  await runScan();
+  res.json({ success: true, signals: state.signals, count: Object.keys(state.signals).length });
+});
+
+app.post('/api/sync', async (req, res) => {
+  await syncPositions();
+  await refreshAccount();
+  res.json({ success: true, positions: state.positions });
+});
+
+app.post('/api/buy/:ticker', async (req, res) => {
+  const ticker = req.params.ticker.toUpperCase();
+  if (!config.tickers.includes(ticker))
+    return res.status(400).json({ success: false, error: 'Ticker not in watchlist' });
+  const price = await fetchLatestPrice(ticker) || state.prices[ticker];
+  if (!price)
+    return res.status(400).json({ success: false, error: 'No price available - run a scan first' });
+  const err = await executeBuy(ticker, price);
+  if (err) return res.status(400).json({ success: false, error: err });
+  res.json({ success: true, ticker, price, amount: config.maxPositionUsd, paper: config.paperMode });
+});
+
+app.post('/api/sell/:ticker', async (req, res) => {
+  const ticker = req.params.ticker.toUpperCase();
+  if (!state.positions[ticker])
+    return res.status(400).json({ success: false, error: `No open position for ${ticker}` });
+  const price = await fetchLatestPrice(ticker) || state.positions[ticker].current_price;
+  const err = await executeSell(ticker, price);
+  if (err) return res.status(400).json({ success: false, error: err });
+  res.json({ success: true, ticker, price, paper: config.paperMode });
+});
+
+// Serve React app for any non-API route
+app.get('*', (req, res) => {
+  const indexPath = join(__dirname, 'dist', 'index.html');
+  if (existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.json({ status: 'Trade engine API running', frontend: 'not built' });
+  }
+});
+
+// -- Start server --------------------------------------------------
+const server = app.listen(PORT, async () => {
+  console.log(`[SERVER] Trade engine running on port ${PORT}`);
+  await refreshAccount();
+  await syncPositions();
+  // Invo poller is controlled via API - don't auto-start
+  console.log('[INVO] Poller ready - use /api/invo/start to begin');
+  console.log(`[SERVER] Connected to Alpaca - paper mode: ${config.paperMode}`);
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.log(`[SERVER] Port ${PORT} in use - waiting 3s then retrying...`);
+    setTimeout(() => {
+      server.close();
+      server.listen(PORT);
+    }, 3000);
+  } else {
+    console.error('[SERVER] Unexpected error:', err);
+  }
+});
