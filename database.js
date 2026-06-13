@@ -95,7 +95,7 @@ export async function getAllConfig() {
 export async function getInvoUsers() {
   if (REPLIT_DB_URL) {
     const users = await dbGet('invo:users');
-    return Array.isArray(users) ? users : ['crypto_rocket'];
+    return Array.isArray(users) ? users : [];  // empty = all users mode
   }
   return [...memStore.invo_users];
 }

@@ -628,7 +628,15 @@ export default function App() {
             </button>
           </div>
 
-          <div style={{ marginBottom: 8, color: "#4A5568", fontFamily: "monospace", fontSize: 11 }}>TRACKED USERS</div>
+          <div style={{ marginBottom: 8, display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ color: "#4A5568", fontFamily: "monospace", fontSize: 11 }}>USER WHITELIST</span>
+            <span style={{ fontFamily: "monospace", fontSize: 10,
+              color: (!invoStatus.users || invoStatus.users.length === 0) ? C.green : "#F5A623" }}>
+              {(!invoStatus.users || invoStatus.users.length === 0)
+                ? "● ALL USERS (default)"
+                : `● WHITELIST ONLY (${invoStatus.users.length} users)`}
+            </span>
+          </div>
           <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
             <input
               value={invoUserInput}
@@ -653,7 +661,9 @@ export default function App() {
 
           <div style={{ background: "#0D1117", borderRadius: 6, padding: 8, marginBottom: 12 }}>
             {(!invoStatus.users || invoStatus.users.length === 0) && (
-              <div style={{ color: "#4A5568", fontFamily: "monospace", fontSize: 11, padding: 4 }}>No users tracked</div>
+              <div style={{ color: C.green, fontFamily: "monospace", fontSize: 11, padding: 4 }}>
+                Trading ALL users — add users above to restrict to a whitelist
+              </div>
             )}
             {invoStatus.users?.map(user => (
               <div key={user} style={{ display: "flex", justifyContent: "space-between",
