@@ -222,13 +222,28 @@ export async function startInvoPoller(invoState) {
         seen.add(item.id);
 
         const type     = item.type || '';
-        const username = item.username || item.user?.username || '';
 
-        // Only process target users
-        const isTracked = targetUsers.some(u =>
-          username.toLowerCase().includes(u.toLowerCase())
-        );
-        if (!isTracked) continue;
+        // Extract username — try multiple fields, log what we find
+        const username     = item.username || item.user?.username || '';
+        const displayName  = item.displayName || item.user?.displayName || item.name || '';
+        const handle       = item.handle || item.user?.handle || username;
+
+        // Log all new notifications so we can see what fields are available
+        console.log(`[INVO] Notification: type=${type} username="${username}" display="${displayName}" handle="${handle}"`);
+
+        // Match against any of the available name fields
+        const isTracked = targetUsers.some(u => {
+          const uLower = u.toLowerCase().replace('@','');
+          return username.toLowerCase().includes(uLower)
+            || displayName.toLowerCase().includes(uLower)
+            || handle.toLowerCase().includes(uLower)
+            || uLower.includes(username.toLowerCase())
+            || uLower.includes(handle.toLowerCase());
+        });
+        if (!isTracked) {
+          console.log(`[INVO] Not tracked — skipping (watching: ${targetUsers.join(', ')})`);
+          continue;
+        }
 
         console.log(`[INVO] 🔔 New: ${type} from ${username}`);
 
