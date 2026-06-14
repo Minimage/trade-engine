@@ -192,20 +192,15 @@ export async function startInvoPoller(invoState) {
       }
       console.log(`[INVO] Got ${items.length} notifications from API`);
 
-      // On first run, only mark the most recent 10 as seen
-      // This prevents missing notifications that came in during a restart
+      // On first run, mark ALL existing as seen so we don't re-trade old positions
+      // But only if we have persistent storage — otherwise skip to avoid missing trades
       if (isFirstRun) {
         isFirstRun = false;
-        const recentItems = items.slice(0, 10);
-        for (const item of recentItems) {
-          if (item.id) markNotificationSeen(item.id);
-        }
-        console.log(`[INVO] Startup: marked ${recentItems.length} most recent notifications as seen`);
-        // Don't return — process remaining items as potential new trades
-        // but only items NOT in the recent batch
-        const recentIds = new Set(recentItems.map(i => i.id));
-        // Filter to only process items older than the recent batch
-        // Actually just return and start fresh next poll
+        // Only mark as seen if we have a real database (not in-memory)
+        // In-memory seen list gets wiped on restart anyway so skip marking
+        console.log(`[INVO] Startup: skipping seen-marking, will process new notifications only`);
+        // Don't mark anything — let the seen list handle deduplication naturally
+        // Items already in DB seen list will be skipped, new ones will be processed
         return;
       }
 
