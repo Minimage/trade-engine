@@ -2,6 +2,14 @@ import express from 'express';
 import cors from 'cors';
 import fetch from 'node-fetch';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
+import {
+  coinbasePlaceOrder,
+  coinbaseClosePosition,
+  coinbaseGetProduct,
+  coinbaseGetPrice,
+  isCoinbaseConfigured,
+} from './coinbase.js';
+
 import { initDatabase, getConfig, setConfig, getAllConfig, addInvoUser, removeInvoUser, getInvoUsers } from './database.js';
 import { startInvoPoller } from './invo_poller.js';
 
@@ -894,48 +902,82 @@ app.post('/api/mirror-trade', async (req, res) => {
   console.log(`[MIRROR] ${source || 'invo'} -> Invo account: ${action.toUpperCase()} ${ticker}`);
 
   try {
-    const price = state.prices[ticker] || await fetchLatestPrice(ticker);
-    if (!price) return res.status(404).json({ error: `Could not fetch price for ${ticker}` });
-
     const alpacaSymbol = isCrypto(ticker)
       ? (CRYPTO_MAP[ticker] || ticker.replace('-', '/'))
       : ticker;
-    const qty = (config.maxPositionUsd / price).toFixed(8);
+
+    // Try Alpaca first, fall back to Binance if ticker not found
+    const alpacaPrice = state.prices[ticker] || await fetchLatestPrice(ticker);
+
+    if (alpacaPrice) {
+      // --- ALPACA PATH ---
+      console.log(`[MIRROR] Using Alpaca for ${ticker}`);
+      const qty = (config.maxPositionUsd / alpacaPrice).toFixed(8);
+
+      if (action === 'buy') {
+        const payload = isCrypto(ticker)
+          ? { symbol: alpacaSymbol, notional: config.maxPositionUsd.toFixed(2), side: 'buy', type: 'market', time_in_force: 'gtc' }
+          : { symbol: alpacaSymbol, qty, side: 'buy', type: 'market', time_in_force: 'day' };
+        console.log(`[MIRROR] BUY on Invo Alpaca account`);
+        const order = await invoAlpacaPost('/orders', payload);
+        console.log(`[MIRROR] BUY response: status=${order.status} id=${order.id}`);
+        return res.json({ success: true, action: 'buy', ticker, price: alpacaPrice, exchange: 'alpaca', orderId: order.id });
+
+      } else if (action === 'short') {
+        const payload = isCrypto(ticker)
+          ? { symbol: alpacaSymbol, notional: config.maxPositionUsd.toFixed(2), side: 'sell', type: 'market', time_in_force: 'gtc' }
+          : { symbol: alpacaSymbol, qty, side: 'sell', type: 'market', time_in_force: 'day' };
+        console.log(`[MIRROR] SHORT on Invo Alpaca account`);
+        const order = await invoAlpacaPost('/orders', payload);
+        console.log(`[MIRROR] SHORT response: status=${order.status} id=${order.id}`);
+        return res.json({ success: true, action: 'short', ticker, price: alpacaPrice, exchange: 'alpaca', orderId: order.id });
+
+      } else if (action === 'sell') {
+        const posSymbol = isCrypto(ticker) ? alpacaSymbol.replace('/', '') : alpacaSymbol;
+        const status = await invoAlpacaDelete(`/positions/${encodeURIComponent(posSymbol)}`);
+        console.log(`[MIRROR] Close Alpaca position status: ${status}`);
+        if (status === 200 || status === 204) {
+          return res.json({ success: true, action: 'sell', ticker, price: alpacaPrice, exchange: 'alpaca' });
+        }
+        // If Alpaca close failed, fall through to Binance
+        console.log(`[MIRROR] Alpaca close failed, trying Binance...`);
+      }
+    }
+
+    // --- COINBASE FALLBACK ---
+    if (!isCoinbaseConfigured()) {
+      return res.status(404).json({ error: `${ticker} not found on Alpaca and Coinbase not configured` });
+    }
+
+    const cbProduct = await coinbaseGetProduct(ticker);
+    if (!cbProduct.found) {
+      console.log(`[MIRROR] ${ticker} not found on Alpaca or Coinbase — skipping`);
+      return res.status(404).json({ error: `${ticker} not supported on Alpaca or Coinbase` });
+    }
+    if (!cbProduct.tradable) {
+      return res.status(400).json({ error: `${ticker} found on Coinbase but not currently tradable` });
+    }
+
+    const cbPrice = await coinbaseGetPrice(ticker);
+    console.log(`[MIRROR] Falling back to Coinbase for ${ticker} @ ${cbPrice}`);
 
     if (action === 'buy') {
-      const payload = isCrypto(ticker)
-        ? { symbol: alpacaSymbol, notional: config.maxPositionUsd.toFixed(2), side: 'buy', type: 'market', time_in_force: 'gtc' }
-        : { symbol: alpacaSymbol, qty, side: 'buy', type: 'market', time_in_force: 'day' };
-      console.log(`[MIRROR] BUY on Invo account:`, JSON.stringify(payload));
-      const order = await invoAlpacaPost('/orders', payload);
-      console.log(`[MIRROR] BUY response: status=${order.status} id=${order.id}`);
-      res.json({ success: true, action: 'buy', ticker, price, orderId: order.id });
+      const order = await coinbasePlaceOrder({ ticker, side: 'BUY', usdAmount: config.maxPositionUsd });
+      return res.json({ success: true, action: 'buy', ticker, price: cbPrice, exchange: 'coinbase', orderId: order.orderId });
 
     } else if (action === 'short') {
-      const payload = isCrypto(ticker)
-        ? { symbol: alpacaSymbol, notional: config.maxPositionUsd.toFixed(2), side: 'sell', type: 'market', time_in_force: 'gtc' }
-        : { symbol: alpacaSymbol, qty, side: 'sell', type: 'market', time_in_force: 'day' };
-      console.log(`[MIRROR] SHORT on Invo account:`, JSON.stringify(payload));
-      const order = await invoAlpacaPost('/orders', payload);
-      console.log(`[MIRROR] SHORT response: status=${order.status} id=${order.id}`);
-      res.json({ success: true, action: 'short', ticker, price, orderId: order.id });
+      // Coinbase spot doesn't support shorts
+      console.log(`[MIRROR] Coinbase spot does not support shorts for ${ticker} — skipping`);
+      return res.status(400).json({ error: `${ticker} not on Alpaca and Coinbase spot does not support shorts` });
 
     } else if (action === 'sell') {
-      const posSymbol = isCrypto(ticker)
-        ? alpacaSymbol.replace('/', '')
-        : alpacaSymbol;
-      console.log(`[MIRROR] Closing ${posSymbol} on Invo account`);
-      const status = await invoAlpacaDelete(`/positions/${encodeURIComponent(posSymbol)}`);
-      console.log(`[MIRROR] Close position status: ${status}`);
-      if (status === 200 || status === 204) {
-        res.json({ success: true, action: 'sell', ticker, price });
-      } else {
-        res.status(400).json({ error: `No position in ${ticker} on Invo account (status ${status})` });
-      }
-
-    } else {
-      res.status(400).json({ error: `Unknown action: ${action}` });
+      const order = await coinbaseClosePosition(ticker);
+      if (order.error) return res.status(400).json({ error: order.error });
+      return res.json({ success: true, action: 'sell', ticker, price: cbPrice, exchange: 'coinbase', orderId: order.orderId });
     }
+
+    res.status(400).json({ error: `Unknown action: ${action}` });
+
   } catch(e) {
     console.error(`[MIRROR] Error:`, e.message);
     res.status(500).json({ error: e.message });
