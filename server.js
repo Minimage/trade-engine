@@ -922,7 +922,12 @@ app.post('/api/mirror-trade', async (req, res) => {
 
     } else if (action === 'sell') {
       console.log(`[MIRROR] Closing ${ticker} on Invo account`);
-      const status = await invoAlpacaDelete(`/positions/${encodeURIComponent(alpacaSymbol)}`);
+      // Alpaca stores crypto as ETHUSD (no slash), stocks as AAPL
+      const posSymbol = isCrypto(ticker)
+        ? alpacaSymbol.replace('/', '')  // ETH/USD -> ETHUSD
+        : alpacaSymbol;
+      const status = await invoAlpacaDelete(`/positions/${encodeURIComponent(posSymbol)}`);
+      console.log(`[MIRROR] Close position status: ${status}`);
       if (status === 200 || status === 204) {
         res.json({ success: true, action: 'sell', ticker, price });
       } else {
