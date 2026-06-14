@@ -284,19 +284,25 @@ export async function startInvoPoller(invoState) {
 
         console.log(`[INVO] Trade: ${ticker} | long=${isLong} | open=${isOpen} | type=${type}`);
 
-        // BUY — new long trade opened
-        if (type === 'user_added_investment' && isLong) {
-          await mirrorTrade('buy', ticker);
+        // BUY long or SHORT
+        if (type === 'user_added_investment') {
+          if (isLong) {
+            console.log(`[INVO] LONG on ${ticker}`);
+            await mirrorTrade('buy', ticker);
+          } else {
+            console.log(`[INVO] SHORT on ${ticker}`);
+            await mirrorTrade('short', ticker);
+          }
         }
 
-        // SELL — trade closed (regardless of direction since we only bought longs)
-        else if (type === 'user_sold_investment') {
+        // Close position
+        else if (type === 'user_sold_investment' || type === 'user_closed_investment') {
           await mirrorTrade('sell', ticker);
         }
 
-        // Skip shorts
-        else if (type === 'user_added_investment' && !isLong) {
-          console.log(`[INVO] ⏭️  Skipping SHORT on ${ticker}`);
+        // Skip updates
+        else if (type === 'user_updated_investment') {
+          console.log(`[INVO] Ignoring update for ${ticker}`);
         }
       }
 
