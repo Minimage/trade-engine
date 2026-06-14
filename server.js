@@ -272,48 +272,6 @@ async function invoAlpacaDelete(path) {
   return r.status;
 }
 
-// -- Ticker resolution --
-// Queries Alpaca to find the correct symbol format and asset class
-const tickerCache = {};
-
-async function resolveTickerType(rawTicker) {
-  const upper = rawTicker.toUpperCase().replace('-USD', '').replace('/USD', '');
-
-  // Return cached result if we've seen this before
-  if (tickerCache[upper]) return tickerCache[upper];
-
-  const attempts = [
-    upper,           // BTC, SOL, AAPL
-    `${upper}/USD`,  // BTC/USD, SOL/USD
-    `${upper}-USD`,  // BTC-USD, SOL-USD
-  ];
-
-  for (const sym of attempts) {
-    try {
-      const encoded = encodeURIComponent(sym);
-      const r = await fetch(`${ALPACA_BASE}/assets/${encoded}`, { headers: HEADERS });
-      if (r.ok) {
-        const data = await r.json();
-        const result = {
-          symbol: data.symbol,       // exact symbol Alpaca uses e.g. BTC/USD
-          assetClass: data.asset_class, // "crypto" or "us_equity"
-          isCryptoAsset: data.asset_class === 'crypto',
-          tradable: data.tradable,
-          shortable: data.shortable,
-        };
-        console.log(`[TICKER] Resolved ${rawTicker} -> ${result.symbol} (${result.assetClass})`);
-        tickerCache[upper] = result;
-        return result;
-      }
-    } catch(e) {
-      // try next format
-    }
-  }
-
-  console.log(`[TICKER] Could not resolve ${rawTicker} on Alpaca`);
-  return null;
-}
-
 // -- Technical indicators ------------------------------------------
 function computeRSI(closes, period = 14) {
   if (closes.length < period + 1) return null;
@@ -936,48 +894,41 @@ app.post('/api/mirror-trade', async (req, res) => {
   console.log(`[MIRROR] ${source || 'invo'} -> Invo account: ${action.toUpperCase()} ${ticker}`);
 
   try {
-    // Resolve ticker via Alpaca API - source of truth for symbol format and asset class
-    const resolved = await resolveTickerType(ticker);
-    if (!resolved) return res.status(404).json({ error: `Ticker ${ticker} not found on Alpaca` });
-    if (!resolved.tradable) return res.status(400).json({ error: `${ticker} is not tradable on Alpaca` });
-
-    const alpacaSymbol = resolved.symbol;  // exact format Alpaca wants e.g. BTC/USD, AAPL
-    const isCryptoAsset = resolved.isCryptoAsset;
-
-    const price = await fetchLatestPrice(ticker);
+    const price = state.prices[ticker] || await fetchLatestPrice(ticker);
     if (!price) return res.status(404).json({ error: `Could not fetch price for ${ticker}` });
 
+    const alpacaSymbol = isCrypto(ticker)
+      ? (CRYPTO_MAP[ticker] || ticker.replace('-', '/'))
+      : ticker;
     const qty = (config.maxPositionUsd / price).toFixed(8);
 
     if (action === 'buy') {
-      const payload = isCryptoAsset
+      const payload = isCrypto(ticker)
         ? { symbol: alpacaSymbol, notional: config.maxPositionUsd.toFixed(2), side: 'buy', type: 'market', time_in_force: 'gtc' }
         : { symbol: alpacaSymbol, qty, side: 'buy', type: 'market', time_in_force: 'day' };
-      console.log(`[MIRROR] BUY ${alpacaSymbol} (${resolved.assetClass}) on Invo account`);
+      console.log(`[MIRROR] BUY on Invo account:`, JSON.stringify(payload));
       const order = await invoAlpacaPost('/orders', payload);
       console.log(`[MIRROR] BUY response: status=${order.status} id=${order.id}`);
-      res.json({ success: true, action: 'buy', ticker: alpacaSymbol, price, orderId: order.id });
+      res.json({ success: true, action: 'buy', ticker, price, orderId: order.id });
 
     } else if (action === 'short') {
-      if (!resolved.shortable) return res.status(400).json({ error: `${ticker} is not shortable` });
-      const payload = isCryptoAsset
+      const payload = isCrypto(ticker)
         ? { symbol: alpacaSymbol, notional: config.maxPositionUsd.toFixed(2), side: 'sell', type: 'market', time_in_force: 'gtc' }
         : { symbol: alpacaSymbol, qty, side: 'sell', type: 'market', time_in_force: 'day' };
-      console.log(`[MIRROR] SHORT ${alpacaSymbol} (${resolved.assetClass}) on Invo account`);
+      console.log(`[MIRROR] SHORT on Invo account:`, JSON.stringify(payload));
       const order = await invoAlpacaPost('/orders', payload);
       console.log(`[MIRROR] SHORT response: status=${order.status} id=${order.id}`);
-      res.json({ success: true, action: 'short', ticker: alpacaSymbol, price, orderId: order.id });
+      res.json({ success: true, action: 'short', ticker, price, orderId: order.id });
 
     } else if (action === 'sell') {
-      // Alpaca position endpoint uses symbol without slash for crypto e.g. BTCUSD
-      const posSymbol = isCryptoAsset
+      const posSymbol = isCrypto(ticker)
         ? alpacaSymbol.replace('/', '')
         : alpacaSymbol;
       console.log(`[MIRROR] Closing ${posSymbol} on Invo account`);
       const status = await invoAlpacaDelete(`/positions/${encodeURIComponent(posSymbol)}`);
       console.log(`[MIRROR] Close position status: ${status}`);
       if (status === 200 || status === 204) {
-        res.json({ success: true, action: 'sell', ticker: alpacaSymbol, price });
+        res.json({ success: true, action: 'sell', ticker, price });
       } else {
         res.status(400).json({ error: `No position in ${ticker} on Invo account (status ${status})` });
       }
