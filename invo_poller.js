@@ -89,7 +89,7 @@ async function refreshAccessToken(refreshToken) {
 async function getNotifications(accessToken, page = 1) {
   const { status, data } = await invoPost(
     '/notifications/get_notifications',
-    { page, size: 50 },
+    { page, size: 20 },
     accessToken
   );
   if (status === 401) return { expired: true };
@@ -192,24 +192,35 @@ export async function startInvoPoller(invoState) {
       }
       console.log(`[INVO] Got ${items.length} notifications from API`);
 
-      // On first run, mark ALL existing as seen so we don't re-trade old positions
-      // But only if we have persistent storage — otherwise skip to avoid missing trades
+      // On startup: mark everything currently visible as seen, trade nothing
+      // From next poll onwards: only NEW items get traded
       if (isFirstRun) {
         isFirstRun = false;
-        // Only mark as seen if we have a real database (not in-memory)
-        // In-memory seen list gets wiped on restart anyway so skip marking
-        console.log(`[INVO] Startup: skipping seen-marking, will process new notifications only`);
-        // Don't mark anything — let the seen list handle deduplication naturally
-        // Items already in DB seen list will be skipped, new ones will be processed
+        let markedCount = 0;
+        for (const item of items) {
+          if (item.id) {
+            const alreadySeen = await isNotificationSeen(item.id);
+            if (!alreadySeen) {
+              await markNotificationSeen(item.id);
+              markedCount++;
+            }
+          }
+        }
+        console.log(`[INVO] Startup complete: marked ${markedCount} existing notifications as seen`);
+        console.log(`[INVO] Now watching for NEW trades only...`);
         return;
       }
 
       const targetUsers = await getInvoUsers();
 
+      let newCount = 0;
+      let skippedCount = 0;
       for (const item of items) {
         // Skip already seen
-        if (!item.id || isNotificationSeen(item.id)) continue;
-        markNotificationSeen(item.id);
+        const alreadySeen = await isNotificationSeen(item.id);
+        if (!item.id || alreadySeen) { skippedCount++; continue; }
+        await markNotificationSeen(item.id);
+        newCount++;
 
         // notificationType is the action field
         const type = item.notificationType || item.type || '';
@@ -285,6 +296,7 @@ export async function startInvoPoller(invoState) {
       }
 
       pruneSeenNotifications();
+      console.log(`[INVO] Poll complete: ${newCount} new, ${skippedCount} already seen`);
 
     } catch(e) {
       console.error('[INVO] Poll error:', e.message);
