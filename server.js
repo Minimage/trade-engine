@@ -861,7 +861,7 @@ app.post('/api/mirror-trade', async (req, res) => {
   console.log(`[MIRROR] ${source || 'invo'} signal: ${action.toUpperCase()} ${ticker}`);
 
   try {
-    if (action === 'buy') {
+    if (action === 'buy' || action === 'short') {
       // Check budget
       const deployed = Object.values(state.positions)
         .reduce((s, p) => s + p.avg_cost * p.shares, 0);
@@ -872,12 +872,26 @@ app.post('/api/mirror-trade', async (req, res) => {
         return res.status(400).json({ error: `Already have position in ${ticker}` });
       }
 
-      // Fetch price directly from Alpaca - works for ANY ticker not just watchlist
       const price = state.prices[ticker] || await fetchLatestPrice(ticker);
       if (!price) return res.status(404).json({ error: `Could not fetch price for ${ticker}` });
 
-      await executeBuy(ticker, price);
-      res.json({ success: true, action: 'buy', ticker, price });
+      if (action === 'short') {
+        // Short sell — place a sell order without owning the asset
+        console.log(`[MIRROR] Shorting ${ticker} @ ${price}`);
+        const alpacaSymbol = isCrypto(ticker)
+          ? (CRYPTO_MAP[ticker] || ticker.replace('-', '/'))
+          : ticker;
+        const qty = (config.maxPositionUsd / price).toFixed(8);
+        const payload = isCrypto(ticker)
+          ? { symbol: alpacaSymbol, qty, side: 'sell', type: 'market', time_in_force: 'gtc' }
+          : { symbol: alpacaSymbol, qty, side: 'sell', type: 'market', time_in_force: 'day' };
+        const order = await alpacaPost('/orders', payload);
+        console.log(`[ORDER] SHORT ${ticker} response: status=${order.status} id=${order.id}`);
+        res.json({ success: true, action: 'short', ticker, price });
+      } else {
+        await executeBuy(ticker, price);
+        res.json({ success: true, action: 'buy', ticker, price });
+      }
 
     } else if (action === 'sell') {
       // Sync positions first to catch any recently opened positions
