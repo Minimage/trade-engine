@@ -927,9 +927,12 @@ app.post('/api/mirror-trade', async (req, res) => {
         const payload = isCrypto(ticker)
           ? { symbol: alpacaSymbol, notional: config.maxPositionUsd.toFixed(2), side: 'sell', type: 'market', time_in_force: 'gtc' }
           : { symbol: alpacaSymbol, qty, side: 'sell', type: 'market', time_in_force: 'day' };
-        console.log(`[MIRROR] SHORT on Invo Alpaca account`);
+        console.log(`[MIRROR] SHORT on Invo Alpaca account:`, JSON.stringify(payload));
         const order = await invoAlpacaPost('/orders', payload);
-        console.log(`[MIRROR] SHORT response: status=${order.status} id=${order.id}`);
+        console.log(`[MIRROR] SHORT full response:`, JSON.stringify(order));
+        if (!order.id) {
+          return res.status(400).json({ error: `Alpaca SHORT failed: ${order.message || order.code || JSON.stringify(order)}` });
+        }
         return res.json({ success: true, action: 'short', ticker, price: alpacaPrice, exchange: 'alpaca', orderId: order.id });
 
       } else if (action === 'sell') {
