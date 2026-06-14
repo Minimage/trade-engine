@@ -891,51 +891,43 @@ app.post('/api/mirror-trade', async (req, res) => {
   const { ticker, action, source } = req.body;
   if (!ticker || !action) return res.status(400).json({ error: 'ticker and action required' });
 
-  console.log(`[MIRROR] ${source || 'invo'} signal: ${action.toUpperCase()} ${ticker}`);
+  console.log(`[MIRROR] ${source || 'invo'} -> Invo account: ${action.toUpperCase()} ${ticker}`);
 
   try {
-    if (action === 'buy' || action === 'short') {
-      // Check budget
-      const deployed = Object.values(state.positions)
-        .reduce((s, p) => s + p.avg_cost * p.shares, 0);
-      if (deployed + config.maxPositionUsd > config.totalBudgetUsd) {
-        return res.status(400).json({ error: 'Budget cap reached' });
-      }
-      if (state.positions[ticker]) {
-        return res.status(400).json({ error: `Already have position in ${ticker}` });
-      }
+    const price = state.prices[ticker] || await fetchLatestPrice(ticker);
+    if (!price) return res.status(404).json({ error: `Could not fetch price for ${ticker}` });
 
-      const price = state.prices[ticker] || await fetchLatestPrice(ticker);
-      if (!price) return res.status(404).json({ error: `Could not fetch price for ${ticker}` });
+    const alpacaSymbol = isCrypto(ticker)
+      ? (CRYPTO_MAP[ticker] || ticker.replace('-', '/'))
+      : ticker;
+    const qty = (config.maxPositionUsd / price).toFixed(8);
 
-      if (action === 'short') {
-        // Short sell — place a sell order without owning the asset
-        console.log(`[MIRROR] Shorting ${ticker} @ ${price}`);
-        const alpacaSymbol = isCrypto(ticker)
-          ? (CRYPTO_MAP[ticker] || ticker.replace('-', '/'))
-          : ticker;
-        const qty = (config.maxPositionUsd / price).toFixed(8);
-        const payload = isCrypto(ticker)
-          ? { symbol: alpacaSymbol, qty, side: 'sell', type: 'market', time_in_force: 'gtc' }
-          : { symbol: alpacaSymbol, qty, side: 'sell', type: 'market', time_in_force: 'day' };
-        const order = await alpacaPost('/orders', payload);
-        console.log(`[ORDER] SHORT ${ticker} response: status=${order.status} id=${order.id}`);
-        res.json({ success: true, action: 'short', ticker, price });
-      } else {
-        await executeBuy(ticker, price);
-        res.json({ success: true, action: 'buy', ticker, price });
-      }
+    if (action === 'buy') {
+      const payload = isCrypto(ticker)
+        ? { symbol: alpacaSymbol, qty, side: 'buy', type: 'market', time_in_force: 'gtc' }
+        : { symbol: alpacaSymbol, qty, side: 'buy', type: 'market', time_in_force: 'day' };
+      console.log(`[MIRROR] BUY on Invo account:`, JSON.stringify(payload));
+      const order = await invoAlpacaPost('/orders', payload);
+      console.log(`[MIRROR] BUY response: status=${order.status} id=${order.id}`);
+      res.json({ success: true, action: 'buy', ticker, price, orderId: order.id });
+
+    } else if (action === 'short') {
+      const payload = isCrypto(ticker)
+        ? { symbol: alpacaSymbol, qty, side: 'sell', type: 'market', time_in_force: 'gtc' }
+        : { symbol: alpacaSymbol, qty, side: 'sell', type: 'market', time_in_force: 'day' };
+      console.log(`[MIRROR] SHORT on Invo account:`, JSON.stringify(payload));
+      const order = await invoAlpacaPost('/orders', payload);
+      console.log(`[MIRROR] SHORT response: status=${order.status} id=${order.id}`);
+      res.json({ success: true, action: 'short', ticker, price, orderId: order.id });
 
     } else if (action === 'sell') {
-      // Sync positions first to catch any recently opened positions
-      await syncPositions();
-
-      // Just try to sell - Alpaca will reject if no position exists
-      const price = state.prices[ticker] || await fetchLatestPrice(ticker);
-      if (!price) return res.status(404).json({ error: `Could not fetch price for ${ticker}` });
-
-      await executeSell(ticker, price);
-      res.json({ success: true, action: 'sell', ticker, price });
+      console.log(`[MIRROR] Closing ${ticker} on Invo account`);
+      const status = await invoAlpacaDelete(`/positions/${encodeURIComponent(alpacaSymbol)}`);
+      if (status === 200 || status === 204) {
+        res.json({ success: true, action: 'sell', ticker, price });
+      } else {
+        res.status(400).json({ error: `No position in ${ticker} on Invo account (status ${status})` });
+      }
 
     } else {
       res.status(400).json({ error: `Unknown action: ${action}` });
@@ -944,7 +936,7 @@ app.post('/api/mirror-trade', async (req, res) => {
     console.error(`[MIRROR] Error:`, e.message);
     res.status(500).json({ error: e.message });
   }
-});
+});;
 
 // -- Invo controls ------------------------------------------------
 // -- Invo test endpoint -- uses Invo Alpaca account
