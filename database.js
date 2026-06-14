@@ -1,92 +1,93 @@
 /**
- * Database Layer using PostgreSQL (Replit DB)
+ * Database Layer using MongoDB
  * Persists across deployments
  */
 
-import pg from 'pg';
-const { Pool } = pg;
+import { MongoClient } from 'mongodb';
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:password@helium/heliumdb?sslmode=disable',
-});
+const uri = process.env.DATABASE_URL;
+let db = null;
+let client = null;
+
+// In-memory fallback
+const mem = {
+  config: {},
+  invo_users: [],
+  invo_seen: new Set(),
+};
 
 export async function initDatabase() {
+  if (!uri) {
+    console.log('[DB] No DATABASE_URL - using in-memory storage (will not persist)');
+    return;
+  }
   try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS config (
-        key   TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS invo_users (
-        username  TEXT PRIMARY KEY,
-        added_at  TIMESTAMPTZ DEFAULT NOW()
-      );
-      CREATE TABLE IF NOT EXISTS invo_seen (
-        id        TEXT PRIMARY KEY,
-        seen_at   TIMESTAMPTZ DEFAULT NOW()
-      );
-      CREATE TABLE IF NOT EXISTS invo_tokens (
-        id            INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-        access_token  TEXT,
-        refresh_token TEXT,
-        updated_at    TIMESTAMPTZ DEFAULT NOW()
-      );
-    `);
-
-    // Seed default if empty
-    const { rows } = await pool.query('SELECT COUNT(*) as n FROM invo_users');
-    if (parseInt(rows[0].n) === 0) {
-      // Empty by default = all users mode
-    }
-
-    console.log('[DB] PostgreSQL database ready');
+    client = new MongoClient(uri);
+    await client.connect();
+    db = client.db('TradeBot');
+    // Create indexes
+    await db.collection('invo_seen').createIndex({ id: 1 }, { unique: true });
+    await db.collection('invo_seen').createIndex({ seen_at: 1 }, { expireAfterSeconds: 604800 }); // 7 days TTL
+    await db.collection('invo_users').createIndex({ username: 1 }, { unique: true });
+    await db.collection('config').createIndex({ key: 1 }, { unique: true });
+    console.log('[DB] MongoDB connected successfully');
   } catch(e) {
-    console.error('[DB] Init error:', e.message);
+    console.error('[DB] MongoDB connection error:', e.message);
+    db = null;
   }
 }
 
 // -- Config --
 export async function getConfig(key, defaultValue = null) {
+  if (!db) return mem.config[key] !== undefined ? mem.config[key] : defaultValue;
   try {
-    const { rows } = await pool.query('SELECT value FROM config WHERE key = $1', [key]);
-    if (!rows.length) return defaultValue;
-    try { return JSON.parse(rows[0].value); } catch(e) { return rows[0].value; }
+    const doc = await db.collection('config').findOne({ key });
+    return doc ? doc.value : defaultValue;
   } catch(e) { return defaultValue; }
 }
 
 export async function setConfig(key, value) {
+  if (!db) { mem.config[key] = value; return; }
   try {
-    await pool.query(
-      'INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2',
-      [key, JSON.stringify(value)]
+    await db.collection('config').updateOne(
+      { key },
+      { $set: { key, value } },
+      { upsert: true }
     );
   } catch(e) { console.error('[DB] setConfig error:', e.message); }
 }
 
 export async function getAllConfig() {
+  if (!db) return { ...mem.config };
   try {
-    const { rows } = await pool.query('SELECT key, value FROM config');
+    const docs = await db.collection('config').find({}).toArray();
     const result = {};
-    for (const row of rows) {
-      try { result[row.key] = JSON.parse(row.value); }
-      catch(e) { result[row.key] = row.value; }
-    }
+    for (const doc of docs) result[doc.key] = doc.value;
     return result;
   } catch(e) { return {}; }
 }
 
 // -- Invo users --
 export async function getInvoUsers() {
+  if (!db) return [...mem.invo_users];
   try {
-    const { rows } = await pool.query('SELECT username FROM invo_users ORDER BY added_at ASC');
-    return rows.map(r => r.username);
+    const docs = await db.collection('invo_users').find({}).sort({ added_at: 1 }).toArray();
+    return docs.map(d => d.username);
   } catch(e) { return []; }
 }
 
 export async function addInvoUser(username) {
   const clean = username.replace('@', '').toLowerCase().trim();
+  if (!db) {
+    if (!mem.invo_users.includes(clean)) mem.invo_users.push(clean);
+    return [...mem.invo_users];
+  }
   try {
-    await pool.query('INSERT INTO invo_users (username) VALUES ($1) ON CONFLICT DO NOTHING', [clean]);
+    await db.collection('invo_users').updateOne(
+      { username: clean },
+      { $setOnInsert: { username: clean, added_at: new Date() } },
+      { upsert: true }
+    );
     console.log(`[DB] Added Invo user: ${clean}`);
   } catch(e) { console.error('[DB] addInvoUser error:', e.message); }
   return getInvoUsers();
@@ -94,8 +95,12 @@ export async function addInvoUser(username) {
 
 export async function removeInvoUser(username) {
   const clean = username.replace('@', '').toLowerCase().trim();
+  if (!db) {
+    mem.invo_users = mem.invo_users.filter(u => u !== clean);
+    return [...mem.invo_users];
+  }
   try {
-    await pool.query('DELETE FROM invo_users WHERE username = $1', [clean]);
+    await db.collection('invo_users').deleteOne({ username: clean });
     console.log(`[DB] Removed Invo user: ${clean}`);
   } catch(e) { console.error('[DB] removeInvoUser error:', e.message); }
   return getInvoUsers();
@@ -103,26 +108,26 @@ export async function removeInvoUser(username) {
 
 // -- Seen notifications --
 export async function isNotificationSeen(id) {
+  if (!db) return mem.invo_seen.has(String(id));
   try {
-    const { rows } = await pool.query('SELECT id FROM invo_seen WHERE id = $1', [String(id)]);
-    return rows.length > 0;
+    const doc = await db.collection('invo_seen').findOne({ id: String(id) });
+    return !!doc;
   } catch(e) { return false; }
 }
 
 export async function markNotificationSeen(id) {
+  if (!db) { mem.invo_seen.add(String(id)); return; }
   try {
-    await pool.query('INSERT INTO invo_seen (id) VALUES ($1) ON CONFLICT DO NOTHING', [String(id)]);
+    await db.collection('invo_seen').updateOne(
+      { id: String(id) },
+      { $setOnInsert: { id: String(id), seen_at: new Date() } },
+      { upsert: true }
+    );
   } catch(e) {}
 }
 
-export async function pruneSeenNotifications(keepDays = 7) {
-  try {
-    const { rowCount } = await pool.query(
-      "DELETE FROM invo_seen WHERE seen_at < NOW() - INTERVAL '$1 days'",
-      [keepDays]
-    );
-    if (rowCount > 0) console.log(`[DB] Pruned ${rowCount} old seen notifications`);
-  } catch(e) {}
+export async function pruneSeenNotifications() {
+  // MongoDB TTL index handles this automatically
 }
 
 // -- Tokens --
@@ -133,20 +138,21 @@ export async function getTokens() {
       refreshToken: process.env.INVO_REFRESH_TOKEN,
     };
   }
+  if (!db) return null;
   try {
-    const { rows } = await pool.query('SELECT * FROM invo_tokens WHERE id = 1');
-    if (!rows.length) return null;
-    return { accessToken: rows[0].access_token, refreshToken: rows[0].refresh_token };
+    const doc = await db.collection('invo_tokens').findOne({ _id: 'main' });
+    if (!doc) return null;
+    return { accessToken: doc.access_token, refreshToken: doc.refresh_token };
   } catch(e) { return null; }
 }
 
 export async function saveTokens(accessToken, refreshToken) {
+  if (!db) return;
   try {
-    await pool.query(`
-      INSERT INTO invo_tokens (id, access_token, refresh_token, updated_at)
-      VALUES (1, $1, $2, NOW())
-      ON CONFLICT (id) DO UPDATE SET
-        access_token = $1, refresh_token = $2, updated_at = NOW()
-    `, [accessToken, refreshToken]);
+    await db.collection('invo_tokens').updateOne(
+      { _id: 'main' },
+      { $set: { access_token: accessToken, refresh_token: refreshToken, updated_at: new Date() } },
+      { upsert: true }
+    );
   } catch(e) { console.error('[DB] saveTokens error:', e.message); }
 }
