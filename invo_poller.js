@@ -187,17 +187,25 @@ export async function startInvoPoller(invoState) {
       }
 
       if (!items?.length) {
-        console.log('[INVO] No notifications returned');
+        console.log('[INVO] No notifications returned from API');
         return;
       }
+      console.log(`[INVO] Got ${items.length} notifications from API`);
 
-      // On first run, mark all existing as seen without acting on them
+      // On first run, only mark the most recent 10 as seen
+      // This prevents missing notifications that came in during a restart
       if (isFirstRun) {
-        for (const item of items) {
+        isFirstRun = false;
+        const recentItems = items.slice(0, 10);
+        for (const item of recentItems) {
           if (item.id) markNotificationSeen(item.id);
         }
-        isFirstRun = false;
-        console.log(`[INVO] Marked ${items.length} existing notifications as seen`);
+        console.log(`[INVO] Startup: marked ${recentItems.length} most recent notifications as seen`);
+        // Don't return — process remaining items as potential new trades
+        // but only items NOT in the recent batch
+        const recentIds = new Set(recentItems.map(i => i.id));
+        // Filter to only process items older than the recent batch
+        // Actually just return and start fresh next poll
         return;
       }
 
