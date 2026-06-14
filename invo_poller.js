@@ -27,6 +27,11 @@ const POLL_INTERVAL = 60 * 1000; // 60 seconds
 const DEFAULT_USERS = ['crypto_rocket'];
 
 // Map Invo tickers to Alpaca format
+const TICKER_MAP = {
+  'HMSTR': 'HMSTR-USD',
+  'MANTA': 'MANTA-USD',
+};
+
 function mapTicker(ticker) {
   // Known stock exchanges — anything else is treated as crypto
   const knownStocks = new Set([
