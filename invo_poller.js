@@ -159,7 +159,7 @@ export async function startInvoPoller(invoState) {
   }
 
   let isFirstRun = true;
-  const users = getInvoUsers();
+  const users = await getInvoUsers();
   console.log(`[INVO] Following: ${users.join(', ')}`);
   console.log(`[INVO] Polling every ${POLL_INTERVAL / 1000}s`);
 
@@ -201,7 +201,7 @@ export async function startInvoPoller(invoState) {
         return;
       }
 
-      const targetUsers = getInvoUsers();
+      const targetUsers = await getInvoUsers();
 
       for (const item of items) {
         // Skip already seen
@@ -287,7 +287,7 @@ export async function startInvoPoller(invoState) {
       console.error('[INVO] Poll error:', e.message);
     }
 
-    console.log(`[INVO] ⏱ Next poll in ${POLL_INTERVAL/1000}s — watching ${getInvoUsers().join(', ')}`);
+    console.log(`[INVO] ⏱ Next poll in ${POLL_INTERVAL/1000}s — watching ${(await getInvoUsers()).join(', ')}`);
   };
 
   // Run immediately then on interval
