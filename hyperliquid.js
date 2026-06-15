@@ -7,6 +7,7 @@ const HL_TESTNET      = process.env.HL_TESTNET !== 'false';
 const sdk = new Hyperliquid({
   privateKey:    HL_PRIVATE_KEY,
   walletAddress: HL_ACCOUNT_ADDR,
+  vaultAddress: HL_ACCOUNT_ADDR,
   testnet:       HL_TESTNET,
   enableWs:      false,
   disableAssetMapRefresh: false,
