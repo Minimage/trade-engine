@@ -1,75 +1,37 @@
 /**
  * Hyperliquid Exchange Integration
- * Handles altcoin and meme coin trading
- * Uses API wallet authentication
+ * Uses official hyperliquid npm SDK
+ * API Agent Wallet signs on behalf of main account
  */
 
-import { ethers } from 'ethers';
-import fetch from 'node-fetch';
-
-const HL_BASE      = 'https://api.hyperliquid.xyz';
-const HL_TESTNET   = 'https://api.hyperliquid-testnet.xyz';
-const HL_API_URL   = process.env.HL_TESTNET === 'false' ? HL_BASE : HL_TESTNET;
+import { Hyperliquid } from 'hyperliquid';
 
 const HL_PRIVATE_KEY  = process.env.HYPERLIQUID_PRIVATE_KEY  || '0xa70d921f5921ad6c88ce9964b10e47f92020723039942dfe77731a6f008e5fd7';
-const HL_WALLET_ADDR  = process.env.HYPERLIQUID_WALLET_ADDR  || '0x8761ca99192A20ec5A6c591CF19BA680CE8eC1e5'; // API wallet (signs requests)
-const HL_ACCOUNT_ADDR = process.env.HYPERLIQUID_ACCOUNT_ADDR || '0x0B403265cA3663b4999886707f021e9951BB1b3B'; // Main account (trades go here)
+const HL_ACCOUNT_ADDR = process.env.HYPERLIQUID_ACCOUNT_ADDR || '0x0B403265cA3663b4999886707f021e9951BB1b3B';
+const HL_TESTNET      = process.env.HL_TESTNET !== 'false';
 
-// Wallet for signing
-let wallet;
-try {
-  wallet = new ethers.Wallet(HL_PRIVATE_KEY);
-} catch(e) {
-  console.error('[HL] Failed to initialize wallet:', e.message);
-}
+// Initialize SDK
+const sdk = new Hyperliquid({
+  privateKey:    HL_PRIVATE_KEY,
+  walletAddress: HL_ACCOUNT_ADDR, // required when using API Agent Wallet
+  testnet:       HL_TESTNET,
+  enableWs:      false,
+});
 
-// Sign an action for Hyperliquid
-async function signAction(action, nonce) {
-  const msgHash = ethers.utils.keccak256(
-    ethers.utils.toUtf8Bytes(JSON.stringify({ action, nonce }))
-  );
-  const sig = await wallet.signMessage(ethers.utils.arrayify(msgHash));
-  const { r, s, v } = ethers.utils.splitSignature(sig);
-  return { r, s, v };
-}
+console.log(`[HL] Initialized — testnet: ${HL_TESTNET}, account: ${HL_ACCOUNT_ADDR}`);
 
-// Generic Hyperliquid API call
-async function hlPost(endpoint, payload) {
-  const r = await fetch(`${HL_API_URL}${endpoint}`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify(payload),
-  });
-  const text = await r.text();
-  try { return JSON.parse(text); }
-  catch(e) { return { error: text }; }
-}
-
-// Get all available markets/coins on Hyperliquid
-let marketCache = null;
-async function getMarkets() {
-  if (marketCache) return marketCache;
-  try {
-    const data = await hlPost('/info', { type: 'meta' });
-    marketCache = data?.universe || [];
-    return marketCache;
-  } catch(e) {
-    return [];
-  }
-}
-
-// Normalize ticker — Hyperliquid uses just the coin name e.g. "BTC", "PEPE"
+// Normalize ticker to Hyperliquid format (just the coin name)
 export function normalizeHLSymbol(ticker) {
   return ticker
     .toUpperCase()
-    .replace('-USDC', '')
-    .replace('/USDC', '')
-    .replace('-USD', '')
-    .replace('/USD', '')
-    .replace('-USDT', '')
-    .replace('/USDT', '')
-    .replace('USDC', '')
-    .replace('USDT', '')
+    .replace(/-USDC$/, '')
+    .replace(/\/USDC$/, '')
+    .replace(/-USD$/, '')
+    .replace(/\/USD$/, '')
+    .replace(/-USDT$/, '')
+    .replace(/\/USDT$/, '')
+    .replace(/USDC$/, '')
+    .replace(/USDT$/, '')
     .trim();
 }
 
@@ -81,18 +43,19 @@ export async function hlGetAsset(ticker) {
   const symbol = normalizeHLSymbol(ticker);
   if (hlCache[symbol] !== undefined) return hlCache[symbol];
 
-  const markets = await getMarkets();
-  const asset = markets.find(m => m.name.toUpperCase() === symbol);
+  try {
+    const meta = await sdk.info.perpMeta();
+    const universe = meta?.universe || [];
+    const idx = universe.findIndex(m => m.name.toUpperCase() === symbol);
 
-  if (asset) {
-    const result = {
-      symbol,
-      found:      true,
-      assetIndex: markets.indexOf(asset),
-    };
-    hlCache[symbol] = result;
-    console.log(`[HL] Found ${symbol} at index ${result.assetIndex}`);
-    return result;
+    if (idx >= 0) {
+      const result = { symbol, found: true, assetIndex: idx };
+      hlCache[symbol] = result;
+      console.log(`[HL] Found ${symbol} at index ${idx}`);
+      return result;
+    }
+  } catch(e) {
+    console.error(`[HL] Asset lookup error:`, e.message);
   }
 
   hlCache[symbol] = { symbol, found: false };
@@ -100,72 +63,56 @@ export async function hlGetAsset(ticker) {
   return { symbol, found: false };
 }
 
-// Get latest price for a coin
+// Get latest price
 export async function hlGetPrice(ticker) {
   try {
     const symbol = normalizeHLSymbol(ticker);
-    const data   = await hlPost('/info', { type: 'allMids' });
-    return data?.[symbol] ? parseFloat(data[symbol]) : null;
-  } catch(e) { return null; }
-}
-
-// Place a market order on Hyperliquid
-export async function hlPlaceOrder({ ticker, side, usdAmount }) {
-  try {
-    const asset = await hlGetAsset(ticker);
-    if (!asset.found) throw new Error(`${ticker} not found on Hyperliquid`);
-
-    const price = await hlGetPrice(ticker);
-    if (!price) throw new Error(`Could not get price for ${ticker}`);
-
-    const isBuy = side.toLowerCase() === 'buy';
-    const size  = parseFloat((usdAmount / price).toFixed(6));
-    const nonce = Date.now();
-
-    // Limit price with 1% slippage for market-like fill
-    const limitPrice = isBuy
-      ? parseFloat((price * 1.01).toFixed(6))
-      : parseFloat((price * 0.99).toFixed(6));
-
-    const action = {
-      type:   'order',
-      orders: [{
-        a:   asset.assetIndex, // asset index
-        b:   isBuy,            // is buy
-        p:   limitPrice.toString(),
-        s:   size.toString(),
-        r:   false,            // reduce only
-        t:   { limit: { tif: 'Ioc' } }, // immediate or cancel (market-like)
-      }],
-      grouping: 'na',
-    };
-
-    const signature = await signAction(action, nonce);
-
-    const payload = {
-      action,
-      nonce,
-      signature,
-      vaultAddress: HL_ACCOUNT_ADDR,
-    };
-
-    const symbol = asset.symbol;
-    console.log(`[HL] Placing ${side} ${symbol} size=${size} @ ~${price}`);
-    const data = await hlPost('/exchange', payload);
-    console.log(`[HL] Order response:`, JSON.stringify(data));
-
-    if (data?.status === 'ok') {
-      return { success: true, data };
-    } else {
-      throw new Error(JSON.stringify(data));
-    }
+    const mids   = await sdk.info.getAllMids();
+    return mids?.[symbol] ? parseFloat(mids[symbol]) : null;
   } catch(e) {
-    console.error(`[HL] Order error:`, e.message);
-    throw e;
+    console.error(`[HL] Price error:`, e.message);
+    return null;
   }
 }
 
-// Close a position on Hyperliquid
+// Place a market order
+export async function hlPlaceOrder({ ticker, side, usdAmount }) {
+  const asset = await hlGetAsset(ticker);
+  if (!asset.found) throw new Error(`${ticker} not found on Hyperliquid`);
+
+  const price = await hlGetPrice(ticker);
+  if (!price) throw new Error(`Could not get price for ${ticker}`);
+
+  const isBuy = side.toLowerCase() === 'buy';
+  const size  = parseFloat((usdAmount / price).toFixed(6));
+
+  // Use slippage price for IOC (market-like) order
+  const slippagePrice = isBuy
+    ? parseFloat((price * 1.02).toFixed(6))
+    : parseFloat((price * 0.98).toFixed(6));
+
+  console.log(`[HL] Placing ${side} ${asset.symbol} size=${size} @ ~${price}`);
+
+  const orderRequest = {
+    coin:       asset.symbol,
+    is_buy:     isBuy,
+    sz:         size,
+    limit_px:   slippagePrice,
+    order_type: { limit: { tif: 'Ioc' } },
+    reduce_only: false,
+  };
+
+  const result = await sdk.exchange.placeOrder(orderRequest);
+  console.log(`[HL] Order result:`, JSON.stringify(result));
+
+  if (result?.response?.type === 'order' || result?.status === 'ok') {
+    return { success: true, result };
+  } else {
+    throw new Error(JSON.stringify(result));
+  }
+}
+
+// Close a position
 export async function hlClosePosition(ticker) {
   try {
     const asset = await hlGetAsset(ticker);
@@ -174,53 +121,40 @@ export async function hlClosePosition(ticker) {
     const price = await hlGetPrice(ticker);
     if (!price) return { error: `Could not get price for ${ticker}` };
 
-    // Get current position size
-    const stateData = await hlPost('/info', {
-      type:    'clearinghouseState',
-      user:    HL_ACCOUNT_ADDR,
-    });
-
-    const positions = stateData?.assetPositions || [];
-    const pos = positions.find(p => p.position?.coin === normalizeHLSymbol(ticker));
+    // Get current positions
+    const state     = await sdk.info.perpetuals.getClearinghouseState(HL_ACCOUNT_ADDR);
+    const positions = state?.assetPositions || [];
+    const pos       = positions.find(p => p.position?.coin === asset.symbol);
 
     if (!pos || parseFloat(pos.position?.szi || 0) === 0) {
-      return { error: `No position in ${ticker} on Hyperliquid` };
+      return { error: `No position in ${asset.symbol} on Hyperliquid` };
     }
 
-    const size    = Math.abs(parseFloat(pos.position.szi));
-    const isLong  = parseFloat(pos.position.szi) > 0;
-    const nonce   = Date.now();
+    const size   = Math.abs(parseFloat(pos.position.szi));
+    const isLong = parseFloat(pos.position.szi) > 0;
 
-    // Close by selling if long, buying if short
-    const limitPrice = isLong
-      ? parseFloat((price * 0.99).toFixed(6))
-      : parseFloat((price * 1.01).toFixed(6));
+    const slippagePrice = isLong
+      ? parseFloat((price * 0.98).toFixed(6))
+      : parseFloat((price * 1.02).toFixed(6));
 
-    const action = {
-      type:   'order',
-      orders: [{
-        a:   asset.assetIndex,
-        b:   !isLong,  // opposite side to close
-        p:   limitPrice.toString(),
-        s:   size.toString(),
-        r:   true,     // reduce only — closes position
-        t:   { limit: { tif: 'Ioc' } },
-      }],
-      grouping: 'na',
+    const orderRequest = {
+      coin:        asset.symbol,
+      is_buy:      !isLong,
+      sz:          size,
+      limit_px:    slippagePrice,
+      order_type:  { limit: { tif: 'Ioc' } },
+      reduce_only: true,
     };
 
-    const signature = await signAction(action, nonce);
-    const payload   = { action, nonce, signature, vaultAddress: HL_ACCOUNT_ADDR };
+    console.log(`[HL] Closing ${asset.symbol} position size=${size}`);
+    const result = await sdk.exchange.placeOrder(orderRequest);
+    console.log(`[HL] Close result:`, JSON.stringify(result));
 
-    console.log(`[HL] Closing ${ticker} position size=${size}`);
-    const data = await hlPost('/exchange', payload);
-    console.log(`[HL] Close response:`, JSON.stringify(data));
-
-    return data?.status === 'ok' ? { success: true, data } : { error: JSON.stringify(data) };
+    return { success: true, result };
   } catch(e) {
     console.error(`[HL] Close error:`, e.message);
     throw e;
   }
 }
 
-export const isHLConfigured = () => !!HL_PRIVATE_KEY && !!HL_WALLET_ADDR;
+export const isHLConfigured = () => !!HL_PRIVATE_KEY && !!HL_ACCOUNT_ADDR;
