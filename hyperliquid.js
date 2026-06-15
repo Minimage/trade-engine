@@ -44,12 +44,12 @@ export async function hlGetAsset(ticker) {
   if (hlCache[symbol] !== undefined) return hlCache[symbol];
 
   try {
-    const meta = await sdk.info.perpMeta();
-    const universe = meta?.universe || [];
-    const idx = universe.findIndex(m => m.name.toUpperCase() === symbol);
+    const assets = await sdk.info.getAllAssets();
+    const found = assets.perp.includes(symbol);
+    
 
-    if (idx >= 0) {
-      const result = { symbol, found: true, assetIndex: idx };
+    if (found) {
+      const result = { symbol, found: true };
       hlCache[symbol] = result;
       console.log(`[HL] Found ${symbol} at index ${idx}`);
       return result;
@@ -89,7 +89,7 @@ export async function hlPlaceOrder({ ticker, side, usdAmount }) {
   // Use slippage price for IOC (market-like) order
   const slippagePrice = isBuy
     ? parseFloat((price * 1.02).toFixed(6))
-    : parseFloat((price * 0.98).toFixed(6));
+    : parseFloat((price * 0.98).toFixed(1));
 
   console.log(`[HL] Placing ${side} ${asset.symbol} size=${size} @ ~${price}`);
 
@@ -135,7 +135,7 @@ export async function hlClosePosition(ticker) {
 
     const slippagePrice = isLong
       ? parseFloat((price * 0.98).toFixed(6))
-      : parseFloat((price * 1.02).toFixed(6));
+      : parseFloat((price * 1.02).toFixed(1));
 
     const orderRequest = {
       coin:        asset.symbol,
