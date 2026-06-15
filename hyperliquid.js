@@ -12,7 +12,8 @@ const HL_TESTNET   = 'https://api.hyperliquid-testnet.xyz';
 const HL_API_URL   = process.env.HL_TESTNET === 'false' ? HL_BASE : HL_TESTNET;
 
 const HL_PRIVATE_KEY  = process.env.HYPERLIQUID_PRIVATE_KEY  || '0xa70d921f5921ad6c88ce9964b10e47f92020723039942dfe77731a6f008e5fd7';
-const HL_WALLET_ADDR  = process.env.HYPERLIQUID_WALLET_ADDR  || '0x8761ca99192A20ec5A6c591CF19BA680CE8eC1e5';
+const HL_WALLET_ADDR  = process.env.HYPERLIQUID_WALLET_ADDR  || '0x8761ca99192A20ec5A6c591CF19BA680CE8eC1e5'; // API wallet (signs requests)
+const HL_ACCOUNT_ADDR = process.env.HYPERLIQUID_ACCOUNT_ADDR || '0x0B403265cA3663b4999886707f021e9951BB1b3B'; // Main account (trades go here)
 
 // Wallet for signing
 let wallet;
@@ -145,7 +146,7 @@ export async function hlPlaceOrder({ ticker, side, usdAmount }) {
       action,
       nonce,
       signature,
-      vaultAddress: HL_WALLET_ADDR,
+      vaultAddress: HL_ACCOUNT_ADDR,
     };
 
     const symbol = asset.symbol;
@@ -176,7 +177,7 @@ export async function hlClosePosition(ticker) {
     // Get current position size
     const stateData = await hlPost('/info', {
       type:    'clearinghouseState',
-      user:    HL_WALLET_ADDR,
+      user:    HL_ACCOUNT_ADDR,
     });
 
     const positions = stateData?.assetPositions || [];
@@ -209,7 +210,7 @@ export async function hlClosePosition(ticker) {
     };
 
     const signature = await signAction(action, nonce);
-    const payload   = { action, nonce, signature, vaultAddress: HL_WALLET_ADDR };
+    const payload   = { action, nonce, signature, vaultAddress: HL_ACCOUNT_ADDR };
 
     console.log(`[HL] Closing ${ticker} position size=${size}`);
     const data = await hlPost('/exchange', payload);
