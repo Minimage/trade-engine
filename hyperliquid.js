@@ -68,7 +68,7 @@ export async function hlPlaceOrder({ ticker, side, usdAmount }) {
   const price = await hlGetPrice(ticker);
   if (!price) throw new Error(`Could not get price for ${ticker}`);
   const isBuy = side.toLowerCase() === 'buy';
-  const size  = parseFloat((usdAmount / price).toFixed(1));
+  const size  = Math.floor(usdAmount / price);
   console.log(`[HL] Placing ${side} ${asset.symbol} size=${size} @ ~${price}`);
   const result = await sdk.custom.marketOpen(asset.symbol, isBuy, size);
   console.log(`[HL] Order result:`, JSON.stringify(result));
