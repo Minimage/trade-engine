@@ -3,12 +3,12 @@ import cors from 'cors';
 import fetch from 'node-fetch';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import {
-  coinbasePlaceOrder,
-  coinbaseClosePosition,
-  coinbaseGetProduct,
-  coinbaseGetPrice,
-  isCoinbaseConfigured,
-} from './coinbase.js';
+  hlPlaceOrder,
+  hlClosePosition,
+  hlGetAsset,
+  hlGetPrice,
+  isHLConfigured,
+} from './hyperliquid.js';
 
 import { initDatabase, getConfig, setConfig, getAllConfig, addInvoUser, removeInvoUser, getInvoUsers } from './database.js';
 import { startInvoPoller } from './invo_poller.js';
@@ -947,36 +947,31 @@ app.post('/api/mirror-trade', async (req, res) => {
       }
     }
 
-    // --- COINBASE FALLBACK ---
-    if (!isCoinbaseConfigured()) {
-      return res.status(404).json({ error: `${ticker} not found on Alpaca and Coinbase not configured` });
+    // --- HYPERLIQUID FALLBACK ---
+    if (!isHLConfigured()) {
+      return res.status(404).json({ error: `${ticker} not found on Alpaca and Hyperliquid not configured` });
     }
 
-    const cbProduct = await coinbaseGetProduct(ticker);
-    if (!cbProduct.found) {
-      console.log(`[MIRROR] ${ticker} not found on Alpaca or Coinbase — skipping`);
-      return res.status(404).json({ error: `${ticker} not supported on Alpaca or Coinbase` });
-    }
-    if (!cbProduct.tradable) {
-      return res.status(400).json({ error: `${ticker} found on Coinbase but not currently tradable` });
+    const hlAsset = await hlGetAsset(ticker);
+    if (!hlAsset.found) {
+      return res.status(404).json({ error: `${ticker} not found on Alpaca or Hyperliquid` });
     }
 
-    const cbPrice = await coinbaseGetPrice(ticker);
-    console.log(`[MIRROR] Falling back to Coinbase for ${ticker} @ ${cbPrice}`);
+    const hlPrice = await hlGetPrice(ticker);
+    console.log(`[MIRROR] Falling back to Hyperliquid for ${ticker} @ ${hlPrice}`);
 
     if (action === 'buy') {
-      const order = await coinbasePlaceOrder({ ticker, side: 'BUY', usdAmount: config.maxPositionUsd });
-      return res.json({ success: true, action: 'buy', ticker, price: cbPrice, exchange: 'coinbase', orderId: order.orderId });
+      const order = await hlPlaceOrder({ ticker, side: 'buy', usdAmount: config.maxPositionUsd });
+      return res.json({ success: true, action: 'buy', ticker, price: hlPrice, exchange: 'hyperliquid' });
 
     } else if (action === 'short') {
-      // Coinbase spot doesn't support shorts
-      console.log(`[MIRROR] Coinbase spot does not support shorts for ${ticker} — skipping`);
-      return res.status(400).json({ error: `${ticker} not on Alpaca and Coinbase spot does not support shorts` });
+      const order = await hlPlaceOrder({ ticker, side: 'sell', usdAmount: config.maxPositionUsd });
+      return res.json({ success: true, action: 'short', ticker, price: hlPrice, exchange: 'hyperliquid' });
 
     } else if (action === 'sell') {
-      const order = await coinbaseClosePosition(ticker);
+      const order = await hlClosePosition(ticker);
       if (order.error) return res.status(400).json({ error: order.error });
-      return res.json({ success: true, action: 'sell', ticker, price: cbPrice, exchange: 'coinbase', orderId: order.orderId });
+      return res.json({ success: true, action: 'sell', ticker, price: hlPrice, exchange: 'hyperliquid' });
     }
 
     res.status(400).json({ error: `Unknown action: ${action}` });
