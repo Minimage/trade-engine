@@ -61,10 +61,15 @@ async function getMarkets() {
 export function normalizeHLSymbol(ticker) {
   return ticker
     .toUpperCase()
+    .replace('-USDC', '')
+    .replace('/USDC', '')
     .replace('-USD', '')
     .replace('/USD', '')
+    .replace('-USDT', '')
+    .replace('/USDT', '')
+    .replace('USDC', '')
     .replace('USDT', '')
-    .replace('USDC', '');
+    .trim();
 }
 
 // Cache for ticker lookups
@@ -143,6 +148,7 @@ export async function hlPlaceOrder({ ticker, side, usdAmount }) {
       vaultAddress: HL_WALLET_ADDR,
     };
 
+    const symbol = asset.symbol;
     console.log(`[HL] Placing ${side} ${symbol} size=${size} @ ~${price}`);
     const data = await hlPost('/exchange', payload);
     console.log(`[HL] Order response:`, JSON.stringify(data));
