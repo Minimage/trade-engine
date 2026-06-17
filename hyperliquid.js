@@ -214,9 +214,12 @@ export async function hlGetAccountState() {
           Math.abs(size) * entryPrice,
         );
 
+        const rawCoin = String(p.position?.coin || "");
+        const baseCoin = rawCoin.replace("-PERP", "");
+
         return {
-          coin: p.position?.coin,
-          ticker: `${p.position?.coin}-USD`,
+          coin: rawCoin,
+          ticker: `${baseCoin}-USD`,
           size,
           entryPrice,
           pnl: parseNum(p.position?.unrealizedPnl),
