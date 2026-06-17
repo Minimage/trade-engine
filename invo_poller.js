@@ -22,6 +22,10 @@ import {
   isNotificationSeen,
   markNotificationSeen,
   pruneSeenNotifications,
+  recordOpenTrade,
+  getOpenTrade,
+  clearOpenTrade,
+  getAllOpenTrades,
 } from "./database.js";
 
 // ── Config ────────────────────────────────────────────────────────
@@ -78,7 +82,6 @@ function mapTicker(ticker) {
   }
 
   // Everything else from Invo is crypto — add -USD suffix
-  // This covers XMR, TAO, CRV, ZEC, CC, and any new tokens
   return `${ticker.toUpperCase()}-USD`;
 }
 
@@ -139,16 +142,39 @@ async function getPostDetails(postId, accessToken) {
 }
 
 // ── Mirror trade to bot ───────────────────────────────────────────
-async function mirrorTrade(action, ticker) {
+// username is passed so we can record who opened the trade
+async function mirrorTrade(action, ticker, username) {
   const alpacaTicker = mapTicker(ticker);
   const port = process.env.PORT || 3002;
 
   try {
-    // Always attempt closes — the local position cache misses short positions
-    // entered via 'short' action. Let the exchange reject if no position exists.
     if (action === "sell") {
-      console.log(`[INVO] Sending close for ${alpacaTicker}`);
+      // Check DB for an open trade record on this ticker
+      const openTrade = await getOpenTrade(alpacaTicker);
+
+      if (!openTrade) {
+        // No record at all — we never opened this, skip it
+        console.log(
+          `[INVO] No open trade record for ${alpacaTicker} — skipping close`,
+        );
+        return;
+      }
+
+      if (openTrade.openedBy !== username) {
+        // Different user is selling — not our signal to close
+        console.log(
+          `[INVO] ${username} sold ${alpacaTicker} but position was opened by ${openTrade.openedBy} — skipping`,
+        );
+        return;
+      }
+
+      console.log(
+        `[INVO] Closing ${alpacaTicker} (opened by ${openTrade.openedBy})`,
+      );
     }
+
+    const side =
+      action === "short" ? "short" : action === "buy" ? "long" : null;
 
     const res = await fetch(`http://localhost:${port}/api/mirror-trade`, {
       method: "POST",
@@ -156,10 +182,21 @@ async function mirrorTrade(action, ticker) {
       body: JSON.stringify({ action, ticker: alpacaTicker, source: "invo" }),
     });
     const data = await res.json();
+
     if (res.ok) {
       console.log(
         `[INVO] ✅ ${action.toUpperCase()} ${alpacaTicker} sent to bot`,
       );
+
+      // On successful open: record in DB
+      if (action === "buy" || action === "short") {
+        await recordOpenTrade(alpacaTicker, username, side);
+      }
+
+      // On successful close: clear from DB
+      if (action === "sell") {
+        await clearOpenTrade(alpacaTicker);
+      }
     } else {
       console.log(
         `[INVO] ❌ ${action.toUpperCase()} ${alpacaTicker} failed: ${data.error}`,
@@ -197,6 +234,21 @@ export async function startInvoPoller(invoState) {
   console.log(`[INVO] Following: ${users.join(", ")}`);
   console.log(`[INVO] Polling every ${POLL_INTERVAL / 1000}s`);
 
+  // On startup, log any open trades we're still tracking from the DB
+  const existingTrades = await getAllOpenTrades();
+  if (existingTrades.length > 0) {
+    console.log(
+      `[INVO] Resuming with ${existingTrades.length} open trade(s) from DB:`,
+    );
+    for (const t of existingTrades) {
+      console.log(
+        `[INVO]   ${t.ticker} — opened by ${t.openedBy} (${t.side}) at ${t.openedAt}`,
+      );
+    }
+  } else {
+    console.log("[INVO] No open trades in DB — fresh start");
+  }
+
   const poll = async () => {
     // Check if stopped
     if (invoState && !invoState.running) {
@@ -211,7 +263,7 @@ export async function startInvoPoller(invoState) {
         const newToken = await refreshAccessToken(tokens.refreshToken);
         if (newToken) {
           tokens.accessToken = newToken;
-          saveTokens(tokens);
+          dbSaveTokens(newToken, tokens.refreshToken);
           const result = await getNotifications(tokens.accessToken);
           items = result.items;
         } else {
@@ -228,22 +280,54 @@ export async function startInvoPoller(invoState) {
       }
       console.log(`[INVO] Got ${items.length} notifications from API`);
 
-      // On startup: mark everything currently visible as seen, trade nothing
-      // From next poll onwards: only NEW items get traded
+      // On startup: mark everything currently visible as seen
+      // Exception: if we have an open DB record for a ticker and a close notification
+      // is in this batch, still process it so we don't miss a close that happened
+      // during a restart window
       if (isFirstRun) {
         isFirstRun = false;
         let markedCount = 0;
+        let closedCount = 0;
+
         for (const item of items) {
-          if (item.id) {
-            const alreadySeen = await isNotificationSeen(item.id);
-            if (!alreadySeen) {
-              await markNotificationSeen(item.id);
-              markedCount++;
+          if (!item.id) continue;
+          const alreadySeen = await isNotificationSeen(item.id);
+          if (!alreadySeen) {
+            await markNotificationSeen(item.id);
+            markedCount++;
+          }
+
+          // Check if this is a close for a ticker we have an open record for
+          const type = item.notificationType || item.type || "";
+          if (
+            type === "user_sold_investment" ||
+            type === "user_closed_investment"
+          ) {
+            const postId = item.postId || item.post_id || item.id;
+            if (!postId) continue;
+
+            const { trade } = await getPostDetails(postId, tokens.accessToken);
+            if (!trade?.ticker) continue;
+
+            const alpacaTicker = mapTicker(trade.ticker);
+            const openTrade = await getOpenTrade(alpacaTicker);
+
+            if (openTrade) {
+              const contentStr = item.content || "";
+              const username = contentStr.split(" ")[0] || "";
+              if (openTrade.openedBy === username) {
+                console.log(
+                  `[INVO] Startup: detected pending close for ${alpacaTicker} (opened by ${username}) — executing`,
+                );
+                await mirrorTrade("sell", trade.ticker, username);
+                closedCount++;
+              }
             }
           }
         }
+
         console.log(
-          `[INVO] Startup complete: marked ${markedCount} existing notifications as seen`,
+          `[INVO] Startup complete: marked ${markedCount} notifications as seen, closed ${closedCount} pending position(s)`,
         );
         console.log(`[INVO] Now watching for NEW trades only...`);
         return;
@@ -268,13 +352,11 @@ export async function startInvoPoller(invoState) {
 
         // Username is embedded in the content string e.g. "vortex_legion added a new investment"
         const contentStr = item.content || "";
-        const usernameFromContent = contentStr.split(" ")[0] || "";
+        const username = contentStr.split(" ")[0] || "";
 
         console.log(
           `[INVO] Notification: type="${type}" content="${contentStr}" postId="${item.postId}"`,
         );
-
-        const username = usernameFromContent;
 
         // Empty list = ALL USERS mode (default)
         // Non-empty list = only trade listed users
@@ -299,7 +381,8 @@ export async function startInvoPoller(invoState) {
         // Only act on buy/sell notifications
         if (
           type !== "user_added_investment" &&
-          type !== "user_sold_investment"
+          type !== "user_sold_investment" &&
+          type !== "user_closed_investment"
         ) {
           continue;
         }
@@ -338,10 +421,10 @@ export async function startInvoPoller(invoState) {
         if (type === "user_added_investment") {
           if (isLong) {
             console.log(`[INVO] LONG on ${ticker}`);
-            await mirrorTrade("buy", ticker);
+            await mirrorTrade("buy", ticker, username);
           } else {
             console.log(`[INVO] SHORT on ${ticker}`);
-            await mirrorTrade("short", ticker);
+            await mirrorTrade("short", ticker, username);
           }
         }
 
@@ -350,7 +433,7 @@ export async function startInvoPoller(invoState) {
           type === "user_sold_investment" ||
           type === "user_closed_investment"
         ) {
-          await mirrorTrade("sell", ticker);
+          await mirrorTrade("sell", ticker, username);
         }
 
         // Skip updates
