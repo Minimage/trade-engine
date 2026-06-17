@@ -245,6 +245,7 @@ export default function App() {
   const [cooldowns, setCooldowns] = useState({});
   const [ranges, setRanges] = useState({});
   const [invoStatus, setInvoStatus] = useState({ running: false, users: [] });
+  const [hlAccount, setHlAccount] = useState({ balance: 0, positions: [], deployed: 0, available: 0 });
   const [invoUserInput, setInvoUserInput] = useState('');
   const [editConfig, setEditConfig] = useState({});
   const isEditingConfig = useRef(false);
@@ -606,6 +607,44 @@ export default function App() {
       {/* ── INVO ── */}
       {tab === "invo" && (
         <div style={{ padding: 16 }}>
+          {/* Hyperliquid Account Panel */}
+          <div style={{ background: "#0D1117", border: "1px solid #1A2332", borderRadius: 8, padding: 16, marginBottom: 20 }}>
+            <div style={{ color: C.green, fontFamily: "monospace", fontSize: 12, marginBottom: 12, fontWeight: "bold" }}>HYPERLIQUID ACCOUNT</div>
+            <div style={{ display: "flex", gap: 16, marginBottom: 12 }}>
+              <div style={{ flex: 1, background: "#07090F", borderRadius: 6, padding: 10 }}>
+                <div style={{ color: "#4A5568", fontFamily: "monospace", fontSize: 10 }}>TOTAL BALANCE</div>
+                <div style={{ color: C.text, fontFamily: "monospace", fontSize: 16, fontWeight: "bold" }}>${hlAccount.balance.toFixed(2)}</div>
+              </div>
+              <div style={{ flex: 1, background: "#07090F", borderRadius: 6, padding: 10 }}>
+                <div style={{ color: "#4A5568", fontFamily: "monospace", fontSize: 10 }}>DEPLOYED</div>
+                <div style={{ color: "#F5A623", fontFamily: "monospace", fontSize: 16, fontWeight: "bold" }}>${hlAccount.deployed.toFixed(2)}</div>
+              </div>
+              <div style={{ flex: 1, background: "#07090F", borderRadius: 6, padding: 10 }}>
+                <div style={{ color: "#4A5568", fontFamily: "monospace", fontSize: 10 }}>AVAILABLE</div>
+                <div style={{ color: C.green, fontFamily: "monospace", fontSize: 16, fontWeight: "bold" }}>${hlAccount.available.toFixed(2)}</div>
+              </div>
+            </div>
+            {hlAccount.positions.length > 0 ? (
+              <div>
+                <div style={{ color: "#4A5568", fontFamily: "monospace", fontSize: 10, marginBottom: 6 }}>OPEN POSITIONS</div>
+                {hlAccount.positions.map((p, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                    background: "#07090F", borderRadius: 4, padding: "6px 10px", marginBottom: 4 }}>
+                    <span style={{ color: C.text, fontFamily: "monospace", fontSize: 12 }}>{p.coin}</span>
+                    <span style={{ color: p.side === 'long' ? C.green : "#FF4444", fontFamily: "monospace", fontSize: 11 }}>
+                      {p.side.toUpperCase()} {Math.abs(p.size).toFixed(2)}
+                    </span>
+                    <span style={{ color: p.pnl >= 0 ? C.green : "#FF4444", fontFamily: "monospace", fontSize: 11 }}>
+                      {p.pnl >= 0 ? '+' : ''}${p.pnl.toFixed(2)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ color: "#4A5568", fontFamily: "monospace", fontSize: 11 }}>No open positions</div>
+            )}
+          </div>
+
           <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 12 }}>
             <span style={{ color: C.green, fontFamily: "monospace", fontSize: 13, fontWeight: "bold" }}>INVO COPY TRADING</span>
             <span style={{ color: invoStatus.running ? C.green : "#FF4444", fontFamily: "monospace", fontSize: 11 }}>

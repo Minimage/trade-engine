@@ -7,6 +7,7 @@ import {
   hlClosePosition,
   hlGetAsset,
   hlGetPrice,
+  hlGetAccountState,
   isHLConfigured,
 } from "./hyperliquid.js";
 
@@ -1142,6 +1143,19 @@ app.post("/api/mirror-trade", async (req, res) => {
       `[MIRROR] Routing to Hyperliquid: ${action.toUpperCase()} ${ticker} @ ${hlPrice}`,
     );
 
+    if (action === "buy" || action === "short") {
+      // Check Hyperliquid balance before trading
+      const accountState = await hlGetAccountState();
+      console.log(
+        `[MIRROR] HL balance: $${accountState.balance.toFixed(2)} available, $${accountState.deployed.toFixed(2)} deployed`,
+      );
+      if (accountState.available < config.maxPositionUsd) {
+        return res.status(400).json({
+          error: `Insufficient Hyperliquid balance. Available: $${accountState.available.toFixed(2)}, needed: $${config.maxPositionUsd}`,
+        });
+      }
+    }
+
     if (action === "buy") {
       const order = await hlPlaceOrder({
         ticker,
@@ -1183,6 +1197,16 @@ app.post("/api/mirror-trade", async (req, res) => {
     res.status(400).json({ error: `Unknown action: ${action}` });
   } catch (e) {
     console.error(`[MIRROR] Error:`, e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// -- Hyperliquid account status endpoint
+app.get("/api/hl/account", async (req, res) => {
+  try {
+    const state = await hlGetAccountState();
+    res.json(state);
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
