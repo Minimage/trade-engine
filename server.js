@@ -747,9 +747,30 @@ function detectSignal(bars) {
 // -- Account & position sync ---------------------------------------
 async function refreshAccount() {
   try {
-    state.account = await alpacaGet("/account");
+    const hl = await hlGetAccountState();
+    state.account = {
+      exchange: "hyperliquid",
+      currency: "USD",
+      portfolio_value: hl.balance,
+      equity: hl.balance,
+      cash: hl.available,
+      buying_power: hl.available,
+      perp_balance: hl.perpBalance ?? 0,
+      spot_usdc: hl.spotUsdc ?? 0,
+      withdrawable: hl.withdrawable ?? 0,
+      deployed_capital: hl.deployed ?? 0,
+      raw: hl,
+    };
   } catch (e) {
-    console.error("[ACCOUNT]", e.message);
+    console.error("[HL ACCOUNT]", e.message);
+    state.account = {
+      exchange: "hyperliquid",
+      error: e.message,
+      portfolio_value: 0,
+      equity: 0,
+      cash: 0,
+      buying_power: 0,
+    };
   }
 }
 
@@ -777,105 +798,80 @@ function matchTicker(alpacaSymbol) {
 
 async function syncPositions() {
   try {
-    const alpacaPos = await alpacaGet("/positions");
-    console.log(`[SYNC] Found ${alpacaPos.length} positions on Alpaca`);
+    const hl = await hlGetAccountState();
     const synced = {};
-    for (const pos of alpacaPos) {
-      console.log(`[SYNC] Raw position symbol: ${pos.symbol}`);
-      const ticker = matchTicker(pos.symbol);
-      if (!ticker) {
-        console.log(
-          `[SYNC] Could not match ${pos.symbol} to watchlist - skipping`,
-        );
-        continue;
-      }
-      console.log(`[SYNC] Matched ${pos.symbol} -> ${ticker}`);
+
+    for (const pos of hl.positions || []) {
+      const ticker = `${pos.coin}-USD`;
       synced[ticker] = {
-        shares: parseFloat(pos.qty),
-        avg_cost: parseFloat(pos.avg_entry_price),
-        current_price: parseFloat(pos.current_price),
-        pnl: parseFloat(pos.unrealized_pl),
-        pnl_pct: parseFloat(pos.unrealized_plpc) * 100,
-        asset_type: isCrypto(ticker) ? "crypto" : "stock",
+        shares: Math.abs(pos.size),
+        avg_cost: pos.entryPrice,
+        current_price: await hlGetPrice(ticker),
+        pnl: pos.pnl,
+        pnl_pct: pos.value > 0 ? (pos.pnl / pos.value) * 100 : 0,
+        asset_type: "crypto",
+        exchange: "hyperliquid",
+        side: pos.side,
         synced: true,
       };
     }
-    // Keep paper positions that aren't in Alpaca
+
+    // Keep paper/manual local positions that are not synced from Hyperliquid.
     for (const [t, p] of Object.entries(state.positions)) {
       if (!p.synced && !synced[t]) synced[t] = p;
     }
+
     state.positions = synced;
-    console.log(`[SYNC] Done - ${Object.keys(synced).length} positions loaded`);
+    console.log(
+      `[HL SYNC] Done - ${Object.keys(synced).length} Hyperliquid positions loaded`,
+    );
   } catch (e) {
-    console.error("[SYNC]", e.message);
+    console.error("[HL SYNC]", e.message);
   }
 }
 
 // -- Trade execution -----------------------------------------------
 async function executeBuy(ticker, price) {
-  const shares = config.maxPositionUsd / price;
+  const orderPrice = (await hlGetPrice(ticker)) || price;
+  const shares = config.maxPositionUsd / orderPrice;
   const logEntry = {
     time: new Date().toISOString(),
     ticker,
     action: "BUY",
-    price,
+    price: orderPrice,
     shares,
     paper: config.paperMode,
-    asset_type: isCrypto(ticker) ? "crypto" : "stock",
+    asset_type: "crypto",
+    exchange: "hyperliquid",
   };
 
-  if (!config.paperMode) {
-    try {
-      // Alpaca crypto orders use BTC/USD format with slash
-      const orderSym = isCrypto(ticker)
-        ? alpacaSym(ticker) // e.g. BTC/USD
-        : ticker; // e.g. AAPL
-      // For crypto, use qty instead of notional to avoid ambiguity
-      // qty = dollars / price, rounded to 8 decimal places
-      const orderPayload = isCrypto(ticker)
-        ? {
-            symbol: orderSym,
-            qty: (config.maxPositionUsd / price).toFixed(8),
-            side: "buy",
-            type: "market",
-            time_in_force: "gtc",
-          }
-        : {
-            symbol: orderSym,
-            notional: config.maxPositionUsd.toFixed(2),
-            side: "buy",
-            type: "market",
-            time_in_force: "day",
-          };
-      console.log(
-        `[ORDER] Placing buy payload: ${JSON.stringify(orderPayload)}`,
+  try {
+    if (!isHLConfigured()) throw new Error("Hyperliquid not configured");
+
+    const accountState = await hlGetAccountState();
+    if (accountState.available < config.maxPositionUsd) {
+      throw new Error(
+        `Insufficient Hyperliquid balance. Available: $${accountState.available.toFixed(2)}, needed: $${config.maxPositionUsd}`,
       );
-      const order = await alpacaPost("/orders", orderPayload);
-      console.log(
-        `[ORDER] BUY response: status=${order.status} id=${order.id} symbol=${order.symbol} asset_class=${order.asset_class} filled_qty=${order.filled_qty}`,
-      );
-      logEntry.status = order.status || "submitted";
-      logEntry.order_id = order.id;
-    } catch (e) {
-      logEntry.status = `error: ${e.message}`;
-      console.error(`[ORDER] BUY ${ticker} failed:`, e.message);
-      state.trades.unshift(logEntry);
-      return e.message;
     }
-  } else {
-    logEntry.status = "paper";
-    state.positions[ticker] = {
-      shares,
-      avg_cost: price,
-      current_price: price,
-      pnl: 0,
-      pnl_pct: 0,
-      asset_type: isCrypto(ticker) ? "crypto" : "stock",
-    };
+
+    const order = await hlPlaceOrder({
+      ticker,
+      side: "buy",
+      usdAmount: config.maxPositionUsd,
+    });
+
+    logEntry.status = "submitted";
+    logEntry.order = order;
+  } catch (e) {
+    logEntry.status = `error: ${e.message}`;
+    console.error(`[HL ORDER] BUY ${ticker} failed:`, e.message);
+    state.trades.unshift(logEntry);
+    return e.message;
   }
 
   state.trades.unshift(logEntry);
-  if (!config.paperMode) await syncPositions();
+  await syncPositions();
   await refreshAccount();
   return null;
 }
@@ -883,40 +879,38 @@ async function executeBuy(ticker, price) {
 async function executeSell(ticker, price) {
   const pos = state.positions[ticker];
   if (!pos) return "No position found";
-  const pnl = (price - pos.avg_cost) * pos.shares;
+
+  const orderPrice = (await hlGetPrice(ticker)) || price || pos.current_price;
+  const pnl = (orderPrice - pos.avg_cost) * pos.shares;
   const logEntry = {
     time: new Date().toISOString(),
     ticker,
     action: "SELL",
-    price,
+    price: orderPrice,
     shares: pos.shares,
     pnl,
     paper: config.paperMode,
-    asset_type: pos.asset_type,
+    asset_type: "crypto",
+    exchange: "hyperliquid",
   };
 
-  if (!config.paperMode) {
-    try {
-      const sellSym = isCrypto(ticker) ? alpacaSym(ticker) : ticker; // BTC/USD or AAPL
-      console.log(`[ORDER] Placing sell: symbol=${sellSym}`);
-      // Position endpoint uses BTCUSD format (no slash) even though orders use BTC/USD
-      const positionSym = sellSym.replace("/", "");
-      await alpacaDelete(`/positions/${positionSym}`);
-      logEntry.status = "executed";
-      console.log(`[ORDER] SELL ${ticker} @ ${price} pnl=${pnl.toFixed(2)}`);
-    } catch (e) {
-      logEntry.status = `error: ${e.message}`;
-      console.error(`[ORDER] SELL ${ticker} failed:`, e.message);
-      state.trades.unshift(logEntry);
-      return e.message;
-    }
-  } else {
-    logEntry.status = "paper";
-    delete state.positions[ticker];
+  try {
+    if (!isHLConfigured()) throw new Error("Hyperliquid not configured");
+
+    const order = await hlClosePosition(ticker);
+    if (order?.error) throw new Error(order.error);
+
+    logEntry.status = "submitted";
+    logEntry.order = order;
+  } catch (e) {
+    logEntry.status = `error: ${e.message}`;
+    console.error(`[HL ORDER] SELL ${ticker} failed:`, e.message);
+    state.trades.unshift(logEntry);
+    return e.message;
   }
 
   state.trades.unshift(logEntry);
-  if (!config.paperMode) await syncPositions();
+  await syncPositions();
   await refreshAccount();
   return null;
 }
@@ -1094,11 +1088,12 @@ app.get("/api/status", (req, res) =>
 
 app.get("/api/account", (req, res) => {
   const deployed = Object.values(state.positions).reduce(
-    (s, p) => s + p.avg_cost * p.shares,
+    (s, p) => s + (p.avg_cost || 0) * (p.shares || 0),
     0,
   );
   res.json({
-    ...state.account,
+    ...(state.account || {}),
+    exchange: "hyperliquid",
     deployed_capital: Math.round(deployed * 100) / 100,
     total_budget_usd: config.totalBudgetUsd,
     budget_remaining: Math.max(0, config.totalBudgetUsd - deployed),
@@ -1122,10 +1117,6 @@ app.post("/api/mirror-trade", async (req, res) => {
   );
 
   try {
-    const alpacaSymbol = isCrypto(ticker)
-      ? CRYPTO_MAP[ticker] || ticker.replace("-", "/")
-      : ticker;
-
     // --- ALL INVO TRADES GO TO HYPERLIQUID ---
     if (!isHLConfigured()) {
       return res.status(404).json({ error: "Hyperliquid not configured" });
@@ -1147,7 +1138,7 @@ app.post("/api/mirror-trade", async (req, res) => {
       // Check Hyperliquid balance before trading
       const accountState = await hlGetAccountState();
       console.log(
-        `[MIRROR] HL balance: $${accountState.balance.toFixed(2)} available, $${accountState.deployed.toFixed(2)} deployed`,
+        `[MIRROR] HL balance: total=$${accountState.balance.toFixed(2)}, available=$${accountState.available.toFixed(2)}, deployed=$${accountState.deployed.toFixed(2)}, spot=$${(accountState.spotUsdc || 0).toFixed(2)}, perp=$${(accountState.perpBalance || 0).toFixed(2)}`,
       );
       if (accountState.available < config.maxPositionUsd) {
         return res.status(400).json({
@@ -1302,10 +1293,13 @@ app.post("/api/config", async (req, res) => {
 
 app.post("/api/connect", async (req, res) => {
   try {
-    const account = await alpacaGet("/account");
-    state.account = account;
+    await refreshAccount();
     await syncPositions();
-    res.json({ success: true, account });
+    res.json({
+      success: true,
+      account: state.account,
+      exchange: "hyperliquid",
+    });
   } catch (e) {
     res.status(400).json({ success: false, error: e.message });
   }
@@ -1338,20 +1332,27 @@ app.post("/api/scan", async (req, res) => {
 app.post("/api/sync", async (req, res) => {
   await syncPositions();
   await refreshAccount();
-  res.json({ success: true, positions: state.positions });
+  res.json({
+    success: true,
+    exchange: "hyperliquid",
+    positions: state.positions,
+    account: state.account,
+  });
 });
 
 app.post("/api/buy/:ticker", async (req, res) => {
   const ticker = req.params.ticker.toUpperCase();
-  if (!config.tickers.includes(ticker))
-    return res
-      .status(400)
-      .json({ success: false, error: "Ticker not in watchlist" });
-  const price = (await fetchLatestPrice(ticker)) || state.prices[ticker];
+  const price =
+    (await hlGetPrice(ticker)) ||
+    (await fetchLatestPrice(ticker)) ||
+    state.prices[ticker];
   if (!price)
     return res
       .status(400)
-      .json({ success: false, error: "No price available - run a scan first" });
+      .json({
+        success: false,
+        error: "No Hyperliquid price available for this ticker",
+      });
   const err = await executeBuy(ticker, price);
   if (err) return res.status(400).json({ success: false, error: err });
   res.json({
@@ -1370,7 +1371,7 @@ app.post("/api/sell/:ticker", async (req, res) => {
       .status(400)
       .json({ success: false, error: `No open position for ${ticker}` });
   const price =
-    (await fetchLatestPrice(ticker)) || state.positions[ticker].current_price;
+    (await hlGetPrice(ticker)) || state.positions[ticker].current_price;
   const err = await executeSell(ticker, price);
   if (err) return res.status(400).json({ success: false, error: err });
   res.json({ success: true, ticker, price, paper: config.paperMode });
@@ -1394,7 +1395,9 @@ const server = app.listen(PORT, async () => {
   await syncPositions();
   // Invo poller is controlled via API - don't auto-start
   console.log("[INVO] Poller ready - use /api/invo/start to begin");
-  console.log(`[SERVER] Connected to Alpaca - paper mode: ${config.paperMode}`);
+  console.log(
+    `[SERVER] Hyperliquid mode active - paper mode: ${config.paperMode}`,
+  );
 });
 
 server.on("error", (err) => {

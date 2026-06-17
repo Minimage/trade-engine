@@ -17,11 +17,11 @@ const sdk = new Hyperliquid({
 });
 
 console.log(
-  `[HL] Initialized — testnet: ${HL_TESTNET}, account: ${HL_ACCOUNT_ADDR}`,
+  `[HL] Initialized — testnet: ${HL_TESTNET}, account: ${HL_ACCOUNT_ADDR || "NOT SET"}`,
 );
 
 export function normalizeHLSymbol(ticker) {
-  const clean = ticker
+  const clean = String(ticker || "")
     .toUpperCase()
     .replace(/-USDC$/, "")
     .replace(/\/USDC$/, "")
@@ -66,6 +66,11 @@ async function getSpotState() {
   });
 }
 
+function parseNum(value, fallback = 0) {
+  const n = parseFloat(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 function getUsdcFromSpotState(spotState) {
   const balances = spotState?.balances || [];
 
@@ -73,19 +78,28 @@ function getUsdcFromSpotState(spotState) {
     (b) => b.coin === "USDC" || b.token === "USDC" || b.name === "USDC",
   );
 
-  return parseFloat(
-    usdc?.total ?? usdc?.hold ?? usdc?.free ?? usdc?.available ?? 0,
+  return parseNum(
+    usdc?.total ??
+      usdc?.available ??
+      usdc?.free ??
+      usdc?.hold ??
+      usdc?.balance ??
+      0,
   );
 }
 
 export async function hlGetAsset(ticker) {
   const symbol = normalizeHLSymbol(ticker);
 
+  if (!symbol || symbol === "-PERP") {
+    return { symbol, found: false };
+  }
+
   if (hlCache[symbol] !== undefined) return hlCache[symbol];
 
   try {
     const assets = await sdk.info.getAllAssets();
-    const found = assets.perp.includes(symbol);
+    const found = assets?.perp?.includes(symbol) === true;
 
     const result = { symbol, found };
     hlCache[symbol] = result;
@@ -106,7 +120,6 @@ export async function hlGetPrice(ticker) {
   try {
     const symbol = normalizeHLSymbol(ticker);
     const mids = await sdk.info.getAllMids();
-
     return mids?.[symbol] ? parseFloat(mids[symbol]) : null;
   } catch (e) {
     console.error("[HL] Price error:", e.message);
@@ -116,53 +129,85 @@ export async function hlGetPrice(ticker) {
 
 export async function hlGetAccountState() {
   try {
-    const perpState = await getPerpState();
-    const spotState = await getSpotState();
+    if (!HL_ACCOUNT_ADDR)
+      throw new Error("HYPERLIQUID_ACCOUNT_ADDR is not set");
 
-    console.log("[HL] RAW PERP STATE:", JSON.stringify(perpState, null, 2));
-    console.log("[HL] RAW SPOT STATE:", JSON.stringify(spotState, null, 2));
+    const [perpState, spotState] = await Promise.allSettled([
+      getPerpState(),
+      getSpotState(),
+    ]);
 
-    const perpBalance = parseFloat(
-      perpState?.marginSummary?.accountValue ??
-        perpState?.crossMarginSummary?.accountValue ??
+    const perp = perpState.status === "fulfilled" ? perpState.value : null;
+    const spot = spotState.status === "fulfilled" ? spotState.value : null;
+
+    if (perpState.status === "rejected") {
+      console.error(
+        "[HL] Perp state error:",
+        perpState.reason?.message || perpState.reason,
+      );
+    }
+
+    if (spotState.status === "rejected") {
+      console.error(
+        "[HL] Spot state error:",
+        spotState.reason?.message || spotState.reason,
+      );
+    }
+
+    console.log("[HL] RAW PERP STATE:", JSON.stringify(perp, null, 2));
+    console.log("[HL] RAW SPOT STATE:", JSON.stringify(spot, null, 2));
+
+    const perpBalance = parseNum(
+      perp?.marginSummary?.accountValue ??
+        perp?.crossMarginSummary?.accountValue ??
         0,
     );
 
-    const withdrawable = parseFloat(perpState?.withdrawable ?? 0);
-    const spotUsdc = getUsdcFromSpotState(spotState);
+    const withdrawable = parseNum(perp?.withdrawable ?? 0);
+    const spotUsdc = getUsdcFromSpotState(spot);
 
-    const positions = (perpState?.assetPositions || [])
-      .filter((p) => parseFloat(p.position?.szi || 0) !== 0)
+    const positions = (perp?.assetPositions || [])
+      .filter((p) => parseNum(p.position?.szi) !== 0)
       .map((p) => {
-        const size = parseFloat(p.position.szi || 0);
-        const entryPrice = parseFloat(p.position.entryPx || 0);
+        const size = parseNum(p.position.szi);
+        const entryPrice = parseNum(p.position.entryPx);
+        const value = parseNum(
+          p.position.positionValue,
+          Math.abs(size) * entryPrice,
+        );
 
         return {
           coin: p.position.coin,
           size,
           entryPrice,
-          pnl: parseFloat(p.position.unrealizedPnl || 0),
+          pnl: parseNum(p.position.unrealizedPnl),
           side: size > 0 ? "long" : "short",
-          value: Math.abs(size) * entryPrice,
+          value,
         };
       });
 
-    const deployed = positions.reduce((sum, p) => sum + p.value, 0);
+    const deployed = positions.reduce(
+      (sum, p) => sum + Math.abs(p.value || 0),
+      0,
+    );
 
     const available = Math.max(withdrawable, perpBalance - deployed, spotUsdc);
+    const balance = Math.max(perpBalance, spotUsdc);
 
     console.log(
-      `[HL] Balance check — perp: $${perpBalance.toFixed(2)}, withdrawable: $${withdrawable.toFixed(2)}, spot USDC: $${spotUsdc.toFixed(2)}, available used: $${available.toFixed(2)}`,
+      `[HL] Balance check — total=$${balance.toFixed(2)}, available=$${available.toFixed(2)}, perp=$${perpBalance.toFixed(2)}, withdrawable=$${withdrawable.toFixed(2)}, spot USDC=$${spotUsdc.toFixed(2)}, deployed=$${deployed.toFixed(2)}`,
     );
 
     return {
-      balance: Math.max(perpBalance, spotUsdc),
+      balance,
+      available,
+      deployed,
+      positions,
       perpBalance,
       spotUsdc,
       withdrawable,
-      positions,
-      deployed,
-      available,
+      rawPerp: perp,
+      rawSpot: spot,
     };
   } catch (e) {
     console.error("[HL] Account state error FULL:", e);
@@ -172,24 +217,19 @@ export async function hlGetAccountState() {
 
 export async function hlPlaceOrder({ ticker, side, usdAmount }) {
   const asset = await hlGetAsset(ticker);
-
-  if (!asset.found) {
-    throw new Error(`${ticker} not found on Hyperliquid`);
-  }
+  if (!asset.found) throw new Error(`${ticker} not found on Hyperliquid`);
 
   const price = await hlGetPrice(ticker);
-
-  if (!price) {
-    throw new Error(`Could not get price for ${ticker}`);
-  }
+  if (!price) throw new Error(`Could not get price for ${ticker}`);
 
   const isBuy = side.toLowerCase() === "buy";
 
-  const rawSize = usdAmount / price;
-  const size = Number(rawSize.toPrecision(6));
+  const size = Number((usdAmount / price).toPrecision(6));
 
-  if (size <= 0) {
-    throw new Error(`Order size too small. USD: ${usdAmount}, price: ${price}`);
+  if (!Number.isFinite(size) || size <= 0) {
+    throw new Error(
+      `Invalid Hyperliquid order size. USD: ${usdAmount}, price: ${price}, size: ${size}`,
+    );
   }
 
   console.log(`[HL] Placing ${side} ${asset.symbol} size=${size} @ ~${price}`);
@@ -200,6 +240,7 @@ export async function hlPlaceOrder({ ticker, side, usdAmount }) {
 
   return {
     success: true,
+    exchange: "hyperliquid",
     symbol: asset.symbol,
     side,
     size,
@@ -212,10 +253,7 @@ export async function hlPlaceOrder({ ticker, side, usdAmount }) {
 export async function hlClosePosition(ticker) {
   try {
     const asset = await hlGetAsset(ticker);
-
-    if (!asset.found) {
-      return { error: `${ticker} not found on Hyperliquid` };
-    }
+    if (!asset.found) return { error: `${ticker} not found on Hyperliquid` };
 
     console.log(`[HL] Closing position ${asset.symbol}`);
 
@@ -225,15 +263,14 @@ export async function hlClosePosition(ticker) {
 
     return {
       success: true,
+      exchange: "hyperliquid",
       symbol: asset.symbol,
       result,
     };
   } catch (e) {
-    console.error("[HL] Close error:", e);
+    console.error("[HL] Close error:", e.message);
     throw e;
   }
 }
 
-export const isHLConfigured = () => {
-  return Boolean(HL_PRIVATE_KEY && HL_ACCOUNT_ADDR);
-};
+export const isHLConfigured = () => Boolean(HL_PRIVATE_KEY && HL_ACCOUNT_ADDR);
