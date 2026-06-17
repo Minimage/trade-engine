@@ -24,9 +24,10 @@ import {
   pruneSeenNotifications,
   recordOpenTrade,
   getOpenTrade,
-  clearOpenTrade,
   getAllOpenTrades,
+  closeTrade,
 } from "./database.js";
+import { hlGetPrice } from "./hyperliquid.js";
 
 // ── Config ────────────────────────────────────────────────────────
 const API_BASE = "https://api.involio.com/v1_0";
@@ -169,7 +170,7 @@ async function mirrorTrade(action, ticker, username) {
       }
 
       console.log(
-        `[INVO] Closing ${alpacaTicker} (opened by ${openTrade.openedBy})`,
+        `[INVO] Closing ${alpacaTicker} (opened by ${openTrade.openedBy} @ $${openTrade.entryPrice})`,
       );
     }
 
@@ -188,14 +189,35 @@ async function mirrorTrade(action, ticker, username) {
         `[INVO] ✅ ${action.toUpperCase()} ${alpacaTicker} sent to bot`,
       );
 
-      // On successful open: record in DB
+      // On successful open: fetch live price from HL and record in DB
       if (action === "buy" || action === "short") {
-        await recordOpenTrade(alpacaTicker, username, side);
+        const entryPrice = await hlGetPrice(alpacaTicker).catch(() => null);
+        if (!entryPrice) {
+          console.warn(
+            `[INVO] Could not fetch entry price for ${alpacaTicker} — recording without price`,
+          );
+        }
+        await recordOpenTrade(alpacaTicker, username, side, entryPrice);
       }
 
-      // On successful close: clear from DB
+      // On successful close: fetch live price, calculate PnL, archive to closed_trades
       if (action === "sell") {
-        await clearOpenTrade(alpacaTicker);
+        const exitPrice = await hlGetPrice(alpacaTicker).catch(() => null);
+        if (!exitPrice) {
+          console.warn(
+            `[INVO] Could not fetch exit price for ${alpacaTicker} — closing without PnL`,
+          );
+        }
+        const closed = await closeTrade(alpacaTicker, exitPrice);
+        if (closed) {
+          const pnlStr =
+            closed.pnlPct !== null
+              ? `${closed.pnlPct >= 0 ? "+" : ""}${closed.pnlPct.toFixed(2)}% (${closed.pnlDirection})`
+              : "PnL unknown";
+          console.log(
+            `[INVO] 📊 ${alpacaTicker} closed — entry $${closed.entryPrice} → exit $${exitPrice} | ${pnlStr}`,
+          );
+        }
       }
     } else {
       console.log(
@@ -242,7 +264,7 @@ export async function startInvoPoller(invoState) {
     );
     for (const t of existingTrades) {
       console.log(
-        `[INVO]   ${t.ticker} — opened by ${t.openedBy} (${t.side}) at ${t.openedAt}`,
+        `[INVO]   ${t.ticker} — opened by ${t.openedBy} (${t.side}) @ $${t.entryPrice} at ${t.openedAt}`,
       );
     }
   } else {

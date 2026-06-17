@@ -14,7 +14,8 @@ const mem = {
   config: {},
   invo_users: [],
   invo_seen: new Set(),
-  open_trades: {}, // ticker -> { openedBy, openedAt, side }
+  open_trades: {}, // ticker -> { openedBy, openedAt, side, entryPrice }
+  closed_trades: [], // array of closed trade docs
 };
 
 export async function initDatabase() {
@@ -40,6 +41,8 @@ export async function initDatabase() {
     await db
       .collection("open_trades")
       .createIndex({ ticker: 1 }, { unique: true });
+    await db.collection("closed_trades").createIndex({ closedAt: -1 }); // sort by most recent close
+    await db.collection("closed_trades").createIndex({ openedBy: 1 }); // filter by user
     console.log("[DB] MongoDB connected successfully");
   } catch (e) {
     console.error("[DB] MongoDB connection error:", e.message);
@@ -168,14 +171,13 @@ export async function pruneSeenNotifications() {
 }
 
 // -- Open trades --
-// Records a position we opened so we can match closes to the right user.
-// ticker is the normalized form e.g. 'UNI-USD'
-export async function recordOpenTrade(ticker, openedBy, side) {
-  const doc = { ticker, openedBy, side, openedAt: new Date() };
+// entryPrice is fetched live from HL at the moment the trade opens
+export async function recordOpenTrade(ticker, openedBy, side, entryPrice) {
+  const doc = { ticker, openedBy, side, entryPrice, openedAt: new Date() };
   if (!db) {
     mem.open_trades[ticker] = doc;
     console.log(
-      `[DB] Open trade recorded (mem): ${ticker} by ${openedBy} (${side})`,
+      `[DB] Open trade recorded (mem): ${ticker} by ${openedBy} (${side}) @ $${entryPrice}`,
     );
     return;
   }
@@ -183,13 +185,15 @@ export async function recordOpenTrade(ticker, openedBy, side) {
     await db
       .collection("open_trades")
       .updateOne({ ticker }, { $set: doc }, { upsert: true });
-    console.log(`[DB] Open trade recorded: ${ticker} by ${openedBy} (${side})`);
+    console.log(
+      `[DB] Open trade recorded: ${ticker} by ${openedBy} (${side}) @ $${entryPrice}`,
+    );
   } catch (e) {
     console.error("[DB] recordOpenTrade error:", e.message);
   }
 }
 
-// Returns { ticker, openedBy, side, openedAt } or null if not found
+// Returns { ticker, openedBy, side, entryPrice, openedAt } or null
 export async function getOpenTrade(ticker) {
   if (!db) return mem.open_trades[ticker] || null;
   try {
@@ -210,18 +214,75 @@ export async function getAllOpenTrades() {
   }
 }
 
-// Removes the record once a position is closed
-export async function clearOpenTrade(ticker) {
-  if (!db) {
-    delete mem.open_trades[ticker];
-    console.log(`[DB] Open trade cleared (mem): ${ticker}`);
-    return;
+// Moves an open trade to closed_trades with exit price and calculated PnL,
+// then removes it from open_trades.
+// PnL is direction-aware: shorts profit when price drops, longs profit when price rises.
+export async function closeTrade(ticker, exitPrice) {
+  const openTrade = await getOpenTrade(ticker);
+  if (!openTrade) {
+    console.warn(`[DB] closeTrade: no open trade found for ${ticker}`);
+    return null;
   }
+
+  const { entryPrice, side } = openTrade;
+  let pnlPct = null;
+  let pnlDirection = null;
+
+  if (entryPrice && exitPrice) {
+    if (side === "long") {
+      pnlPct = ((exitPrice - entryPrice) / entryPrice) * 100;
+    } else {
+      // short: profit when price falls
+      pnlPct = ((entryPrice - exitPrice) / entryPrice) * 100;
+    }
+    pnlDirection = pnlPct >= 0 ? "win" : "loss";
+  }
+
+  const closedDoc = {
+    ...openTrade,
+    exitPrice,
+    pnlPct: pnlPct !== null ? parseFloat(pnlPct.toFixed(4)) : null,
+    pnlDirection, // 'win' | 'loss' | null
+    closedAt: new Date(),
+  };
+
+  // Remove _id from openTrade so MongoDB doesn't conflict on insert
+  delete closedDoc._id;
+
+  if (!db) {
+    mem.closed_trades.push(closedDoc);
+    delete mem.open_trades[ticker];
+    console.log(
+      `[DB] Trade closed (mem): ${ticker} @ $${exitPrice} | PnL: ${pnlPct?.toFixed(2)}% (${pnlDirection})`,
+    );
+    return closedDoc;
+  }
+
   try {
+    await db.collection("closed_trades").insertOne(closedDoc);
     await db.collection("open_trades").deleteOne({ ticker });
-    console.log(`[DB] Open trade cleared: ${ticker}`);
+    console.log(
+      `[DB] Trade closed: ${ticker} @ $${exitPrice} | PnL: ${pnlPct?.toFixed(2)}% (${pnlDirection})`,
+    );
   } catch (e) {
-    console.error("[DB] clearOpenTrade error:", e.message);
+    console.error("[DB] closeTrade error:", e.message);
+  }
+
+  return closedDoc;
+}
+
+// Returns recent closed trades, most recent first
+export async function getClosedTrades(limit = 50) {
+  if (!db) return [...mem.closed_trades].reverse().slice(0, limit);
+  try {
+    return await db
+      .collection("closed_trades")
+      .find({})
+      .sort({ closedAt: -1 })
+      .limit(limit)
+      .toArray();
+  } catch (e) {
+    return [];
   }
 }
 
