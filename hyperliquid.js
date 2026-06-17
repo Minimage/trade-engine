@@ -1,8 +1,13 @@
 import { Hyperliquid } from "hyperliquid";
+import fetch from "node-fetch";
 
 const HL_PRIVATE_KEY = process.env.HYPERLIQUID_PRIVATE_KEY;
 const HL_ACCOUNT_ADDR = process.env.HYPERLIQUID_ACCOUNT_ADDR;
 const HL_TESTNET = process.env.HL_TESTNET !== "false";
+
+const INFO_URL = HL_TESTNET
+  ? "https://api.hyperliquid-testnet.xyz/info"
+  : "https://api.hyperliquid.xyz/info";
 
 const sdk = new Hyperliquid({
   privateKey: HL_PRIVATE_KEY,
@@ -34,6 +39,45 @@ export function normalizeHLSymbol(ticker) {
 
 const hlCache = {};
 
+async function hlInfo(body) {
+  const res = await fetch(INFO_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const text = await res.text();
+
+  if (!res.ok) {
+    throw new Error(`Hyperliquid info error ${res.status}: ${text}`);
+  }
+
+  return JSON.parse(text);
+}
+
+async function getPerpState() {
+  return await sdk.info.perpetuals.getClearinghouseState(HL_ACCOUNT_ADDR);
+}
+
+async function getSpotState() {
+  return await hlInfo({
+    type: "spotClearinghouseState",
+    user: HL_ACCOUNT_ADDR,
+  });
+}
+
+function getUsdcFromSpotState(spotState) {
+  const balances = spotState?.balances || [];
+
+  const usdc = balances.find(
+    (b) => b.coin === "USDC" || b.token === "USDC" || b.name === "USDC",
+  );
+
+  return parseFloat(
+    usdc?.total ?? usdc?.hold ?? usdc?.free ?? usdc?.available ?? 0,
+  );
+}
+
 export async function hlGetAsset(ticker) {
   const symbol = normalizeHLSymbol(ticker);
 
@@ -53,7 +97,7 @@ export async function hlGetAsset(ticker) {
     );
     return result;
   } catch (e) {
-    console.error("[HL] Asset lookup error:", e);
+    console.error("[HL] Asset lookup error:", e.message);
     return { symbol, found: false };
   }
 }
@@ -65,26 +109,29 @@ export async function hlGetPrice(ticker) {
 
     return mids?.[symbol] ? parseFloat(mids[symbol]) : null;
   } catch (e) {
-    console.error("[HL] Price error:", e);
+    console.error("[HL] Price error:", e.message);
     return null;
   }
 }
 
 export async function hlGetAccountState() {
   try {
-    const state =
-      await sdk.info.perpetuals.getClearinghouseState(HL_ACCOUNT_ADDR);
+    const perpState = await getPerpState();
+    const spotState = await getSpotState();
 
-    console.log("[HL] RAW ACCOUNT STATE:", JSON.stringify(state, null, 2));
+    console.log("[HL] RAW PERP STATE:", JSON.stringify(perpState, null, 2));
+    console.log("[HL] RAW SPOT STATE:", JSON.stringify(spotState, null, 2));
 
-    const balance = parseFloat(
-      state?.marginSummary?.accountValue ??
-        state?.crossMarginSummary?.accountValue ??
-        state?.withdrawable ??
+    const perpBalance = parseFloat(
+      perpState?.marginSummary?.accountValue ??
+        perpState?.crossMarginSummary?.accountValue ??
         0,
     );
 
-    const positions = (state?.assetPositions || [])
+    const withdrawable = parseFloat(perpState?.withdrawable ?? 0);
+    const spotUsdc = getUsdcFromSpotState(spotState);
+
+    const positions = (perpState?.assetPositions || [])
       .filter((p) => parseFloat(p.position?.szi || 0) !== 0)
       .map((p) => {
         const size = parseFloat(p.position.szi || 0);
@@ -102,12 +149,17 @@ export async function hlGetAccountState() {
 
     const deployed = positions.reduce((sum, p) => sum + p.value, 0);
 
-    const available = parseFloat(
-      state?.withdrawable ?? Math.max(balance - deployed, 0),
+    const available = Math.max(withdrawable, perpBalance - deployed, spotUsdc);
+
+    console.log(
+      `[HL] Balance check — perp: $${perpBalance.toFixed(2)}, withdrawable: $${withdrawable.toFixed(2)}, spot USDC: $${spotUsdc.toFixed(2)}, available used: $${available.toFixed(2)}`,
     );
 
     return {
-      balance,
+      balance: Math.max(perpBalance, spotUsdc),
+      perpBalance,
+      spotUsdc,
+      withdrawable,
       positions,
       deployed,
       available,
@@ -134,7 +186,7 @@ export async function hlPlaceOrder({ ticker, side, usdAmount }) {
   const isBuy = side.toLowerCase() === "buy";
 
   const rawSize = usdAmount / price;
-  const size = Number(rawSize.toFixed(4));
+  const size = Number(rawSize.toPrecision(6));
 
   if (size <= 0) {
     throw new Error(`Order size too small. USD: ${usdAmount}, price: ${price}`);
