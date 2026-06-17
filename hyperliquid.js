@@ -20,6 +20,31 @@ console.log(
   `[HL] Initialized — testnet: ${HL_TESTNET}, account: ${HL_ACCOUNT_ADDR || "NOT SET"}`,
 );
 
+function parseNum(value, fallback = 0) {
+  const n = parseFloat(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+async function hlInfo(body) {
+  const res = await fetch(INFO_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const text = await res.text();
+
+  if (!res.ok) {
+    throw new Error(`Hyperliquid info error ${res.status}: ${text}`);
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Hyperliquid returned non-JSON response: ${text}`);
+  }
+}
+
 export function normalizeHLSymbol(ticker) {
   const clean = String(ticker || "")
     .toUpperCase()
@@ -37,46 +62,49 @@ export function normalizeHLSymbol(ticker) {
   return `${clean}-PERP`;
 }
 
-const hlCache = {};
+function normalizeCoin(ticker) {
+  return normalizeHLSymbol(ticker).replace("-PERP", "");
+}
 
-async function hlInfo(body) {
-  const res = await fetch(INFO_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+const assetCache = {};
+const metaCache = {
+  value: null,
+  fetchedAt: 0,
+};
 
-  const text = await res.text();
+async function getMeta() {
+  const now = Date.now();
 
-  if (!res.ok) {
-    throw new Error(`Hyperliquid info error ${res.status}: ${text}`);
+  // Cache metadata for 5 minutes.
+  if (metaCache.value && now - metaCache.fetchedAt < 5 * 60 * 1000) {
+    return metaCache.value;
   }
 
-  return JSON.parse(text);
+  const meta = await hlInfo({ type: "meta" });
+  metaCache.value = meta;
+  metaCache.fetchedAt = now;
+
+  return meta;
 }
 
 async function getPerpState() {
-  return await sdk.info.perpetuals.getClearinghouseState(HL_ACCOUNT_ADDR);
+  return sdk.info.perpetuals.getClearinghouseState(HL_ACCOUNT_ADDR);
 }
 
 async function getSpotState() {
-  return await hlInfo({
+  return hlInfo({
     type: "spotClearinghouseState",
     user: HL_ACCOUNT_ADDR,
   });
 }
 
-function parseNum(value, fallback = 0) {
-  const n = parseFloat(value);
-  return Number.isFinite(n) ? n : fallback;
-}
-
 function getUsdcFromSpotState(spotState) {
   const balances = spotState?.balances || [];
 
-  const usdc = balances.find(
-    (b) => b.coin === "USDC" || b.token === "USDC" || b.name === "USDC",
-  );
+  const usdc = balances.find((b) => {
+    const coin = String(b.coin || b.token || b.name || "").toUpperCase();
+    return coin === "USDC";
+  });
 
   return parseNum(
     usdc?.total ??
@@ -90,37 +118,46 @@ function getUsdcFromSpotState(spotState) {
 
 export async function hlGetAsset(ticker) {
   const symbol = normalizeHLSymbol(ticker);
+  const coin = symbol.replace("-PERP", "");
 
-  if (!symbol || symbol === "-PERP") {
-    return { symbol, found: false };
+  if (!coin) {
+    return { symbol, coin, found: false };
   }
 
-  if (hlCache[symbol] !== undefined) return hlCache[symbol];
+  if (assetCache[symbol] !== undefined) return assetCache[symbol];
 
   try {
-    const assets = await sdk.info.getAllAssets();
-    const found = assets?.perp?.includes(symbol) === true;
+    const meta = await getMeta();
+    const found = Array.isArray(meta?.universe)
+      ? meta.universe.some((a) => a.name === coin)
+      : false;
 
-    const result = { symbol, found };
-    hlCache[symbol] = result;
+    const result = { symbol, coin, found };
+    assetCache[symbol] = result;
 
     console.log(
       found
         ? `[HL] Found ${symbol}`
         : `[HL] ${symbol} not found on Hyperliquid`,
     );
+
     return result;
   } catch (e) {
     console.error("[HL] Asset lookup error:", e.message);
-    return { symbol, found: false };
+    return { symbol, coin, found: false };
   }
 }
 
 export async function hlGetPrice(ticker) {
   try {
     const symbol = normalizeHLSymbol(ticker);
+    const coin = symbol.replace("-PERP", "");
+
     const mids = await sdk.info.getAllMids();
-    return mids?.[symbol] ? parseFloat(mids[symbol]) : null;
+
+    const value = mids?.[symbol] ?? mids?.[coin] ?? null;
+
+    return value != null ? parseFloat(value) : null;
   } catch (e) {
     console.error("[HL] Price error:", e.message);
     return null;
@@ -129,28 +166,29 @@ export async function hlGetPrice(ticker) {
 
 export async function hlGetAccountState() {
   try {
-    if (!HL_ACCOUNT_ADDR)
+    if (!HL_ACCOUNT_ADDR) {
       throw new Error("HYPERLIQUID_ACCOUNT_ADDR is not set");
+    }
 
-    const [perpState, spotState] = await Promise.allSettled([
+    const [perpResult, spotResult] = await Promise.allSettled([
       getPerpState(),
       getSpotState(),
     ]);
 
-    const perp = perpState.status === "fulfilled" ? perpState.value : null;
-    const spot = spotState.status === "fulfilled" ? spotState.value : null;
+    const perp = perpResult.status === "fulfilled" ? perpResult.value : null;
+    const spot = spotResult.status === "fulfilled" ? spotResult.value : null;
 
-    if (perpState.status === "rejected") {
+    if (perpResult.status === "rejected") {
       console.error(
         "[HL] Perp state error:",
-        perpState.reason?.message || perpState.reason,
+        perpResult.reason?.message || perpResult.reason,
       );
     }
 
-    if (spotState.status === "rejected") {
+    if (spotResult.status === "rejected") {
       console.error(
         "[HL] Spot state error:",
-        spotState.reason?.message || spotState.reason,
+        spotResult.reason?.message || spotResult.reason,
       );
     }
 
@@ -169,25 +207,26 @@ export async function hlGetAccountState() {
     const positions = (perp?.assetPositions || [])
       .filter((p) => parseNum(p.position?.szi) !== 0)
       .map((p) => {
-        const size = parseNum(p.position.szi);
-        const entryPrice = parseNum(p.position.entryPx);
+        const size = parseNum(p.position?.szi);
+        const entryPrice = parseNum(p.position?.entryPx);
         const value = parseNum(
-          p.position.positionValue,
+          p.position?.positionValue,
           Math.abs(size) * entryPrice,
         );
 
         return {
-          coin: p.position.coin,
+          coin: p.position?.coin,
+          ticker: `${p.position?.coin}-USD`,
           size,
           entryPrice,
-          pnl: parseNum(p.position.unrealizedPnl),
+          pnl: parseNum(p.position?.unrealizedPnl),
           side: size > 0 ? "long" : "short",
           value,
         };
       });
 
     const deployed = positions.reduce(
-      (sum, p) => sum + Math.abs(p.value || 0),
+      (sum, p) => sum + Math.abs(parseNum(p.value)),
       0,
     );
 
@@ -215,51 +254,115 @@ export async function hlGetAccountState() {
   }
 }
 
-export async function hlPlaceOrder({ ticker, side, usdAmount }) {
-  const asset = await hlGetAsset(ticker);
-  if (!asset.found) throw new Error(`${ticker} not found on Hyperliquid`);
+async function getSizeDecimals(ticker) {
+  const coin = normalizeCoin(ticker);
+  const meta = await getMeta();
 
-  const price = await hlGetPrice(ticker);
-  if (!price) throw new Error(`Could not get price for ${ticker}`);
+  const universeAsset = meta?.universe?.find((a) => a.name === coin);
 
-  const isBuy = side.toLowerCase() === "buy";
+  if (!universeAsset) {
+    throw new Error(`Could not find Hyperliquid metadata for ${coin}`);
+  }
 
-  const size = Number((usdAmount / price).toPrecision(6));
+  return universeAsset.szDecimals;
+}
+
+function roundSizeToDecimals(rawSize, szDecimals) {
+  const size = Number(rawSize.toFixed(szDecimals));
 
   if (!Number.isFinite(size) || size <= 0) {
     throw new Error(
-      `Invalid Hyperliquid order size. USD: ${usdAmount}, price: ${price}, size: ${size}`,
+      `Invalid Hyperliquid order size. rawSize=${rawSize}, roundedSize=${size}, szDecimals=${szDecimals}`,
     );
   }
 
-  console.log(`[HL] Placing ${side} ${asset.symbol} size=${size} @ ~${price}`);
+  return size;
+}
 
-  const result = await sdk.custom.marketOpen(asset.symbol, isBuy, size);
+export async function hlPlaceOrder({ ticker, side, usdAmount }) {
+  try {
+    if (!HL_PRIVATE_KEY || !HL_ACCOUNT_ADDR) {
+      throw new Error(
+        "Hyperliquid is not configured. Set HYPERLIQUID_PRIVATE_KEY and HYPERLIQUID_ACCOUNT_ADDR.",
+      );
+    }
 
-  console.log("[HL] Order result:", JSON.stringify(result, null, 2));
+    const asset = await hlGetAsset(ticker);
 
-  return {
-    success: true,
-    exchange: "hyperliquid",
-    symbol: asset.symbol,
-    side,
-    size,
-    price,
-    usdAmount,
-    result,
-  };
+    if (!asset.found) {
+      throw new Error(`${ticker} not found on Hyperliquid`);
+    }
+
+    const price = await hlGetPrice(ticker);
+
+    if (!price) {
+      throw new Error(`Could not get price for ${ticker}`);
+    }
+
+    const isBuy = String(side).toLowerCase() === "buy";
+    const szDecimals = await getSizeDecimals(ticker);
+    const rawSize = parseNum(usdAmount) / price;
+    const size = roundSizeToDecimals(rawSize, szDecimals);
+
+    console.log(`[HL] ${asset.symbol} size precision = ${szDecimals}`);
+    console.log(`[HL] Raw size=${rawSize}, rounded size=${size}`);
+    console.log(
+      `[HL] Placing ${side} ${asset.symbol} size=${size} @ ~${price}`,
+    );
+
+    const result = await sdk.custom.marketOpen(asset.symbol, isBuy, size);
+
+    console.log("[HL] Order result:", JSON.stringify(result, null, 2));
+
+    const statuses = result?.response?.data?.statuses || [];
+    const errorStatus = statuses.find((s) => s.error);
+
+    if (errorStatus) {
+      throw new Error(errorStatus.error);
+    }
+
+    return {
+      success: true,
+      exchange: "hyperliquid",
+      symbol: asset.symbol,
+      side,
+      size,
+      price,
+      usdAmount,
+      result,
+    };
+  } catch (e) {
+    console.error("[HL] Place order error:", e.message);
+    throw e;
+  }
 }
 
 export async function hlClosePosition(ticker) {
   try {
+    if (!HL_PRIVATE_KEY || !HL_ACCOUNT_ADDR) {
+      throw new Error(
+        "Hyperliquid is not configured. Set HYPERLIQUID_PRIVATE_KEY and HYPERLIQUID_ACCOUNT_ADDR.",
+      );
+    }
+
     const asset = await hlGetAsset(ticker);
-    if (!asset.found) return { error: `${ticker} not found on Hyperliquid` };
+
+    if (!asset.found) {
+      return { error: `${ticker} not found on Hyperliquid` };
+    }
 
     console.log(`[HL] Closing position ${asset.symbol}`);
 
     const result = await sdk.custom.marketClose(asset.symbol);
 
     console.log("[HL] Close result:", JSON.stringify(result, null, 2));
+
+    const statuses = result?.response?.data?.statuses || [];
+    const errorStatus = statuses.find((s) => s.error);
+
+    if (errorStatus) {
+      throw new Error(errorStatus.error);
+    }
 
     return {
       success: true,
@@ -273,4 +376,6 @@ export async function hlClosePosition(ticker) {
   }
 }
 
-export const isHLConfigured = () => Boolean(HL_PRIVATE_KEY && HL_ACCOUNT_ADDR);
+export const isHLConfigured = () => {
+  return Boolean(HL_PRIVATE_KEY && HL_ACCOUNT_ADDR);
+};
