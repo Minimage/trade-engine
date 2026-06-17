@@ -27,7 +27,7 @@ import {
   getAllOpenTrades,
   closeTrade,
 } from "./database.js";
-import { hlGetPrice } from "./hyperliquid.js";
+import { hlGetPrice, hlGetAccountState } from "./hyperliquid.js";
 
 // ── Config ────────────────────────────────────────────────────────
 const API_BASE = "https://api.involio.com/v1_0";
@@ -145,83 +145,123 @@ async function getPostDetails(postId, accessToken) {
 // ── Mirror trade to bot ───────────────────────────────────────────
 // username is passed so we can record who opened the trade
 async function mirrorTrade(action, ticker, username) {
-  const alpacaTicker = mapTicker(ticker);
+  const normalizedTicker = mapTicker(ticker);
   const port = process.env.PORT || 3002;
 
   try {
     if (action === "sell") {
       // Check DB for an open trade record on this ticker
-      const openTrade = await getOpenTrade(alpacaTicker);
+      const openTrade = await getOpenTrade(normalizedTicker);
 
       if (!openTrade) {
-        // No record at all — we never opened this, skip it
         console.log(
-          `[INVO] No open trade record for ${alpacaTicker} — skipping close`,
+          `[INVO] No open trade record for ${normalizedTicker} — skipping close`,
         );
         return;
       }
 
       if (openTrade.openedBy !== username) {
-        // Different user is selling — not our signal to close
         console.log(
-          `[INVO] ${username} sold ${alpacaTicker} but position was opened by ${openTrade.openedBy} — skipping`,
+          `[INVO] ${username} sold ${normalizedTicker} but position was opened by ${openTrade.openedBy} — skipping`,
         );
         return;
       }
 
       console.log(
-        `[INVO] Closing ${alpacaTicker} (opened by ${openTrade.openedBy} @ $${openTrade.entryPrice})`,
+        `[INVO] Closing ${normalizedTicker} (opened by ${openTrade.openedBy} @ $${openTrade.entryPrice})`,
       );
     }
 
     const side =
       action === "short" ? "short" : action === "buy" ? "long" : null;
 
+    // Before opening, check BOTH the database AND live HL positions.
+    // HL is one-way only so any existing position — even one the bot didn't
+    // open itself — will net against a new order and cause unintended closes.
+    // HL is the source of truth; DB is a secondary sanity check.
+    if (action === "buy" || action === "short") {
+      // 1. Check DB first (fast, no API call)
+      const dbTrade = await getOpenTrade(normalizedTicker);
+      if (dbTrade) {
+        console.log(
+          `[INVO] ⚠️  Skipping ${action.toUpperCase()} ${normalizedTicker} from ${username} — DB shows ${dbTrade.side} already open by ${dbTrade.openedBy} @ $${dbTrade.entryPrice}`,
+        );
+        return;
+      }
+
+      // 2. Check live HL positions (source of truth)
+      try {
+        const hlState = await hlGetAccountState();
+        const baseCoin = normalizedTicker.replace("-USD", "");
+        const hlPosition = hlState.positions.find(
+          (p) =>
+            p.coin === baseCoin ||
+            p.coin === `${baseCoin}-PERP` ||
+            p.ticker === normalizedTicker,
+        );
+        if (hlPosition) {
+          console.log(
+            `[INVO] ⚠️  Skipping ${action.toUpperCase()} ${normalizedTicker} from ${username} — HL shows live ${hlPosition.side} position (size: ${hlPosition.size}). DB may be out of sync.`,
+          );
+          return;
+        }
+      } catch (e) {
+        // If HL check fails, log it but fall through — don't block the trade
+        console.warn(
+          `[INVO] HL position check failed for ${normalizedTicker}: ${e.message} — proceeding anyway`,
+        );
+      }
+    }
+
     const res = await fetch(`http://localhost:${port}/api/mirror-trade`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, ticker: alpacaTicker, source: "invo" }),
+      body: JSON.stringify({
+        action,
+        ticker: normalizedTicker,
+        source: "invo",
+      }),
     });
     const data = await res.json();
 
     if (res.ok) {
       console.log(
-        `[INVO] ✅ ${action.toUpperCase()} ${alpacaTicker} sent to bot`,
+        `[INVO] ✅ ${action.toUpperCase()} ${normalizedTicker} sent to bot`,
       );
 
       // On successful open: fetch live price from HL and record in DB
       if (action === "buy" || action === "short") {
-        const entryPrice = await hlGetPrice(alpacaTicker).catch(() => null);
+        const entryPrice = await hlGetPrice(normalizedTicker).catch(() => null);
         if (!entryPrice) {
           console.warn(
-            `[INVO] Could not fetch entry price for ${alpacaTicker} — recording without price`,
+            `[INVO] Could not fetch entry price for ${normalizedTicker} — recording without price`,
           );
         }
-        await recordOpenTrade(alpacaTicker, username, side, entryPrice);
+        await recordOpenTrade(normalizedTicker, username, side, entryPrice);
       }
 
       // On successful close: fetch live price, calculate PnL, archive to closed_trades
       if (action === "sell") {
-        const exitPrice = await hlGetPrice(alpacaTicker).catch(() => null);
+        const exitPrice = await hlGetPrice(normalizedTicker).catch(() => null);
         if (!exitPrice) {
           console.warn(
-            `[INVO] Could not fetch exit price for ${alpacaTicker} — closing without PnL`,
+            `[INVO] Could not fetch exit price for ${normalizedTicker} — closing without PnL`,
           );
         }
-        const closed = await closeTrade(alpacaTicker, exitPrice);
+        const closed = await closeTrade(normalizedTicker, exitPrice);
         if (closed) {
           const pnlStr =
             closed.pnlPct !== null
               ? `${closed.pnlPct >= 0 ? "+" : ""}${closed.pnlPct.toFixed(2)}% (${closed.pnlDirection})`
               : "PnL unknown";
           console.log(
-            `[INVO] 📊 ${alpacaTicker} closed — entry $${closed.entryPrice} → exit $${exitPrice} | ${pnlStr}`,
+            `[INVO] 📊 ${normalizedTicker} closed — entry $${closed.entryPrice} → exit $${exitPrice} | ${pnlStr}`,
           );
         }
       }
     } else {
       console.log(
-        `[INVO] ❌ ${action.toUpperCase()} ${alpacaTicker} failed: ${data.error}`,
+        `[INVO] ❌ ${action.toUpperCase()} ${normalizedTicker} failed: ${data.error}`,
       );
     }
   } catch (e) {
@@ -331,15 +371,15 @@ export async function startInvoPoller(invoState) {
             const { trade } = await getPostDetails(postId, tokens.accessToken);
             if (!trade?.ticker) continue;
 
-            const alpacaTicker = mapTicker(trade.ticker);
-            const openTrade = await getOpenTrade(alpacaTicker);
+            const normalizedTicker = mapTicker(trade.ticker);
+            const openTrade = await getOpenTrade(normalizedTicker);
 
             if (openTrade) {
               const contentStr = item.content || "";
               const username = contentStr.split(" ")[0] || "";
               if (openTrade.openedBy === username) {
                 console.log(
-                  `[INVO] Startup: detected pending close for ${alpacaTicker} (opened by ${username}) — executing`,
+                  `[INVO] Startup: detected pending close for ${normalizedTicker} (opened by ${username}) — executing`,
                 );
                 await mirrorTrade("sell", trade.ticker, username);
                 closedCount++;
