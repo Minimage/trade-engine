@@ -173,11 +173,8 @@ async function mirrorTrade(action, ticker, username) {
     // No conflict check needed — longs go to LONG account, shorts go to SHORT account.
     // They can never cancel each other out. Multiple users can stack on the same ticker.
     // The only guard is username matching on close (handled above).
-
-    // For sells, look up the side so server.js knows which account to close on
-    const openTradeForSell =
-      action === "sell" ? await getOpenTrade(normalizedTicker, username) : null;
-    const tradeSide = openTradeForSell?.side || null;
+    // For sells, openTrade is already looked up above — reuse it for routing.
+    const tradeSide = action === "sell" ? openTrade?.side || null : null;
 
     const res = await fetch(`http://localhost:${port}/api/mirror-trade`, {
       method: "POST",
