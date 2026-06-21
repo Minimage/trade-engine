@@ -40,7 +40,7 @@ export async function initDatabase() {
     await db.collection("config").createIndex({ key: 1 }, { unique: true });
     await db
       .collection("open_trades")
-      .createIndex({ ticker: 1 }, { unique: true });
+      .createIndex({ ticker: 1, openedBy: 1 }, { unique: true });
     await db.collection("closed_trades").createIndex({ closedAt: -1 }); // sort by most recent close
     await db.collection("closed_trades").createIndex({ openedBy: 1 }); // filter by user
     console.log("[DB] MongoDB connected successfully");
@@ -175,7 +175,9 @@ export async function pruneSeenNotifications() {
 export async function recordOpenTrade(ticker, openedBy, side, entryPrice) {
   const doc = { ticker, openedBy, side, entryPrice, openedAt: new Date() };
   if (!db) {
-    mem.open_trades[ticker] = doc;
+    // In-memory: key by ticker+openedBy to allow multiple users on same ticker
+    const key = `${ticker}:${openedBy}`;
+    mem.open_trades[key] = doc;
     console.log(
       `[DB] Open trade recorded (mem): ${ticker} by ${openedBy} (${side}) @ $${entryPrice}`,
     );
@@ -184,7 +186,7 @@ export async function recordOpenTrade(ticker, openedBy, side, entryPrice) {
   try {
     await db
       .collection("open_trades")
-      .updateOne({ ticker }, { $set: doc }, { upsert: true });
+      .updateOne({ ticker, openedBy }, { $set: doc }, { upsert: true });
     console.log(
       `[DB] Open trade recorded: ${ticker} by ${openedBy} (${side}) @ $${entryPrice}`,
     );
@@ -194,13 +196,32 @@ export async function recordOpenTrade(ticker, openedBy, side, entryPrice) {
 }
 
 // Returns { ticker, openedBy, side, entryPrice, openedAt } or null
-export async function getOpenTrade(ticker) {
-  if (!db) return mem.open_trades[ticker] || null;
+// Pass openedBy to get a specific user's position on that ticker
+export async function getOpenTrade(ticker, openedBy = null) {
+  if (!db) {
+    if (openedBy) return mem.open_trades[`${ticker}:${openedBy}`] || null;
+    // Return first match for ticker if no user specified
+    return (
+      Object.values(mem.open_trades).find((t) => t.ticker === ticker) || null
+    );
+  }
   try {
-    const doc = await db.collection("open_trades").findOne({ ticker });
+    const query = openedBy ? { ticker, openedBy } : { ticker };
+    const doc = await db.collection("open_trades").findOne(query);
     return doc || null;
   } catch (e) {
     return null;
+  }
+}
+
+// Returns ALL open trades for a specific ticker (multiple users may have stacked)
+export async function getOpenTradesByTicker(ticker) {
+  if (!db)
+    return Object.values(mem.open_trades).filter((t) => t.ticker === ticker);
+  try {
+    return await db.collection("open_trades").find({ ticker }).toArray();
+  } catch (e) {
+    return [];
   }
 }
 
@@ -217,8 +238,8 @@ export async function getAllOpenTrades() {
 // Moves an open trade to closed_trades with exit price and calculated PnL,
 // then removes it from open_trades.
 // PnL is direction-aware: shorts profit when price drops, longs profit when price rises.
-export async function closeTrade(ticker, exitPrice) {
-  const openTrade = await getOpenTrade(ticker);
+export async function closeTrade(ticker, exitPrice, openedBy) {
+  const openTrade = await getOpenTrade(ticker, openedBy);
   if (!openTrade) {
     console.warn(`[DB] closeTrade: no open trade found for ${ticker}`);
     return null;
@@ -251,7 +272,7 @@ export async function closeTrade(ticker, exitPrice) {
 
   if (!db) {
     mem.closed_trades.push(closedDoc);
-    delete mem.open_trades[ticker];
+    delete mem.open_trades[`${ticker}:${openTrade.openedBy}`];
     console.log(
       `[DB] Trade closed (mem): ${ticker} @ $${exitPrice} | PnL: ${pnlPct?.toFixed(2)}% (${pnlDirection})`,
     );
@@ -260,7 +281,9 @@ export async function closeTrade(ticker, exitPrice) {
 
   try {
     await db.collection("closed_trades").insertOne(closedDoc);
-    await db.collection("open_trades").deleteOne({ ticker });
+    await db
+      .collection("open_trades")
+      .deleteOne({ ticker, openedBy: openTrade.openedBy });
     console.log(
       `[DB] Trade closed: ${ticker} @ $${exitPrice} | PnL: ${pnlPct?.toFixed(2)}% (${pnlDirection})`,
     );

@@ -1108,12 +1108,20 @@ app.get("/api/signals", (req, res) => res.json(state.signals));
 
 // -- Mirror trade endpoint (receives signals from Invo bot) --------
 app.post("/api/mirror-trade", async (req, res) => {
-  const { ticker, action, source } = req.body;
+  // side is passed from invo_poller so we know which account to use
+  const { ticker, action, source, side } = req.body;
   if (!ticker || !action)
     return res.status(400).json({ error: "ticker and action required" });
 
+  // Determine which account this trade belongs to
+  // buy  -> LONG account
+  // short -> SHORT account
+  // sell  -> use the side recorded at open time (passed from invo_poller)
+  const accountSide =
+    action === "buy" ? "long" : action === "short" ? "short" : side || "long"; // sell: use stored side, fallback to long
+
   console.log(
-    `[MIRROR] ${source || "invo"} -> Invo account: ${action.toUpperCase()} ${ticker}`,
+    `[MIRROR] ${source || "invo"} -> ${accountSide.toUpperCase()} account: ${action.toUpperCase()} ${ticker}`,
   );
 
   try {
@@ -1131,18 +1139,18 @@ app.post("/api/mirror-trade", async (req, res) => {
 
     const hlPrice = await hlGetPrice(ticker);
     console.log(
-      `[MIRROR] Routing to Hyperliquid: ${action.toUpperCase()} ${ticker} @ ${hlPrice}`,
+      `[MIRROR] Routing to Hyperliquid ${accountSide.toUpperCase()}: ${action.toUpperCase()} ${ticker} @ ${hlPrice}`,
     );
 
     if (action === "buy" || action === "short") {
-      // Check Hyperliquid balance before trading
-      const accountState = await hlGetAccountState();
+      // Check balance on the correct account
+      const accountState = await hlGetAccountState(accountSide);
       console.log(
-        `[MIRROR] HL balance: total=$${accountState.balance.toFixed(2)}, available=$${accountState.available.toFixed(2)}, deployed=$${accountState.deployed.toFixed(2)}, spot=$${(accountState.spotUsdc || 0).toFixed(2)}, perp=$${(accountState.perpBalance || 0).toFixed(2)}`,
+        `[MIRROR] HL ${accountSide.toUpperCase()} balance: total=$${accountState.balance.toFixed(2)}, available=$${accountState.available.toFixed(2)}, deployed=$${accountState.deployed.toFixed(2)}`,
       );
       if (accountState.available < config.maxPositionUsd) {
         return res.status(400).json({
-          error: `Insufficient Hyperliquid balance. Available: $${accountState.available.toFixed(2)}, needed: $${config.maxPositionUsd}`,
+          error: `Insufficient Hyperliquid ${accountSide} balance. Available: $${accountState.available.toFixed(2)}, needed: $${config.maxPositionUsd}`,
         });
       }
     }
@@ -1159,6 +1167,7 @@ app.post("/api/mirror-trade", async (req, res) => {
         ticker,
         price: hlPrice,
         exchange: "hyperliquid",
+        account: "long",
       });
     } else if (action === "short") {
       const order = await hlPlaceOrder({
@@ -1172,9 +1181,11 @@ app.post("/api/mirror-trade", async (req, res) => {
         ticker,
         price: hlPrice,
         exchange: "hyperliquid",
+        account: "short",
       });
     } else if (action === "sell") {
-      const order = await hlClosePosition(ticker);
+      // Close on the correct account based on which side opened the position
+      const order = await hlClosePosition(ticker, accountSide);
       if (order.error) return res.status(400).json({ error: order.error });
       return res.json({
         success: true,
@@ -1182,6 +1193,7 @@ app.post("/api/mirror-trade", async (req, res) => {
         ticker,
         price: hlPrice,
         exchange: "hyperliquid",
+        account: accountSide,
       });
     }
 
@@ -1347,12 +1359,10 @@ app.post("/api/buy/:ticker", async (req, res) => {
     (await fetchLatestPrice(ticker)) ||
     state.prices[ticker];
   if (!price)
-    return res
-      .status(400)
-      .json({
-        success: false,
-        error: "No Hyperliquid price available for this ticker",
-      });
+    return res.status(400).json({
+      success: false,
+      error: "No Hyperliquid price available for this ticker",
+    });
   const err = await executeBuy(ticker, price);
   if (err) return res.status(400).json({ success: false, error: err });
   res.json({
